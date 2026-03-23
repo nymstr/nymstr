@@ -10,7 +10,9 @@ use crate::crypto::pgp::{ArcPassphrase, ArcPublicKey, ArcSecretKey, PgpKeyManage
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Group message handler for processing group-related operations
 pub struct GroupMessageHandler {
@@ -28,6 +30,8 @@ pub struct GroupMessageHandler {
     pub mls_storage_path: Option<std::path::PathBuf>,
     /// Shared MLS client from AppState (maintains state across messages)
     pub mls_client: Option<Arc<MlsClient>>,
+    /// Server time tracking for clock-skew resilience (shared from AppState)
+    pub server_times: Option<Arc<RwLock<HashMap<String, (i64, std::time::Instant)>>>>,
 }
 
 impl GroupMessageHandler {
@@ -51,7 +55,20 @@ impl GroupMessageHandler {
             pgp_passphrase,
             mls_storage_path,
             mls_client,
+            server_times: None,
         }
+    }
+
+    /// Get the estimated current server time for a given server identifier.
+    /// Falls back to local clock if no server time has been recorded.
+    async fn get_server_time(&self, server: &str) -> i64 {
+        if let Some(ref times) = self.server_times {
+            let guard = times.read().await;
+            if let Some(&(server_ts, ref received_at)) = guard.get(server) {
+                return server_ts + received_at.elapsed().as_secs() as i64;
+            }
+        }
+        chrono::Utc::now().timestamp()
     }
 
     /// Authenticate with group server (register + connect)
@@ -87,8 +104,9 @@ impl GroupMessageHandler {
 
         let public_key_armored = PgpKeyManager::public_key_armored(public_key)?;
 
-        // Register with the group server using timestamp-based authentication
-        let timestamp = chrono::Utc::now().timestamp();
+        // Use server-relative timestamp to avoid clock skew issues.
+        // Falls back to local clock if no server time is available yet.
+        let timestamp = self.get_server_time("group-server").await;
         let sign_content = format!(
             "register:{}:{}:{}",
             username, group_server_address, timestamp

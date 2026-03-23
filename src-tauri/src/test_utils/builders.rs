@@ -101,6 +101,7 @@ impl MixnetMessageBuilder {
             payload: self.payload,
             signature: self.signature,
             timestamp: self.timestamp,
+            server_time: None,
         }
     }
 }

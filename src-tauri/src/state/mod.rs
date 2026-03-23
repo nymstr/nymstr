@@ -77,6 +77,12 @@ pub struct AppState {
 
     /// Cached discovery server public key for signature verification (TOFU)
     pub server_public_key: Arc<RwLock<Option<SignedPublicKey>>>,
+
+    /// Server time tracking for clock-skew resilience.
+    /// Key: server identifier (e.g. "discovery" or group server address),
+    /// Value: (server_unix_timestamp, local_instant_when_received).
+    /// Used to compute server-relative timestamps for signed requests.
+    pub server_times: Arc<RwLock<HashMap<String, (i64, std::time::Instant)>>>,
 }
 
 impl AppState {
@@ -134,6 +140,7 @@ impl AppState {
             background_tasks: Arc::new(RwLock::new(None)),
             pending_queries: Arc::new(RwLock::new(HashMap::new())),
             server_public_key: Arc::new(RwLock::new(None)),
+            server_times: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -250,6 +257,27 @@ impl AppState {
                 }
                 Err(e) => tracing::warn!("Failed to parse stored server key: {}", e),
             }
+        }
+    }
+
+    /// Store the latest server time received from a server response.
+    /// Called whenever a response containing `serverTime` is received.
+    pub async fn update_server_time(&self, server: &str, server_time: i64) {
+        self.server_times
+            .write()
+            .await
+            .insert(server.to_string(), (server_time, std::time::Instant::now()));
+    }
+
+    /// Get the estimated current server time for a given server.
+    /// Returns `stored_server_time + elapsed_since_stored`, or falls back
+    /// to the local clock if no server time has been recorded yet.
+    pub async fn get_server_time(&self, server: &str) -> i64 {
+        let guard = self.server_times.read().await;
+        if let Some(&(server_ts, ref received_at)) = guard.get(server) {
+            server_ts + received_at.elapsed().as_secs() as i64
+        } else {
+            chrono::Utc::now().timestamp()
         }
     }
 

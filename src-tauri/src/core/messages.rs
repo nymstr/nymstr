@@ -27,6 +27,9 @@ pub struct MixnetMessage {
     pub signature: String,
     /// ISO-8601 timestamp when message was created
     pub timestamp: String,
+    /// Server unix timestamp for clock-skew resilience (optional, present in server responses)
+    #[serde(rename = "serverTime", default, skip_serializing_if = "Option::is_none")]
+    pub server_time: Option<i64>,
 }
 
 impl MixnetMessage {
@@ -43,6 +46,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -60,6 +64,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -76,6 +81,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -93,6 +99,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -110,6 +117,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -133,6 +141,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -150,6 +159,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -173,6 +183,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -203,6 +214,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -225,6 +237,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -241,6 +254,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -263,6 +277,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -280,6 +295,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -301,6 +317,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -324,6 +341,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -347,6 +365,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -363,6 +382,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -379,6 +399,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -405,6 +426,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -429,6 +451,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -456,13 +479,23 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
-    /// Acknowledge receipt of pending messages
-    pub fn ack(username: &str, pending_ids: &[i64]) -> Self {
+    /// Acknowledge receipt of pending messages.
+    /// Uses local clock as fallback. Prefer `ack_with_server_time` when server time is available.
+    pub fn ack(username: &str, pending_ids: &[String]) -> Self {
+        Self::ack_with_server_time(username, pending_ids, chrono::Utc::now().timestamp())
+    }
+
+    /// Acknowledge receipt of pending messages with a server-relative timestamp.
+    /// The `timestamp` parameter should come from `AppState::get_server_time("discovery")`
+    /// to avoid clock skew issues.
+    pub fn ack_with_server_time(username: &str, pending_ids: &[String], timestamp: i64) -> Self {
         let payload = serde_json::json!({
-            "pendingIds": pending_ids
+            "pendingIds": pending_ids,
+            "timestamp": timestamp
         });
         Self {
             message_type: "message".into(),
@@ -472,6 +505,7 @@ impl MixnetMessage {
             payload,
             signature: "placeholder".into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -534,6 +568,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -565,6 +600,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -597,6 +633,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -623,6 +660,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -656,6 +694,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -684,6 +723,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -714,6 +754,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -755,6 +796,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -786,6 +828,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -808,26 +851,27 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
-    /// Request epoch sync from the group server
-    /// Returns all commits since the given epoch for catch-up
+    /// Request commit sync from the group server using cursor-based pagination.
+    /// Returns buffered commits since the given sequence ID for catch-up.
     ///
     /// # Arguments
     /// * `username` - The user requesting sync
     /// * `group_id` - The MLS group ID
-    /// * `since_epoch` - The epoch to sync from (exclusive)
-    /// * `signature` - PGP signature over "{group_id}:{since_epoch}"
+    /// * `since_id` - The last seen commit sequence ID (cursor), 0 for all
+    /// * `signature` - PGP signature over "{group_id}:{since_id}"
     pub fn sync_epoch(
         username: &str,
         group_id: &str,
-        since_epoch: i64,
+        since_id: i64,
         signature: &str,
     ) -> Self {
         let payload = serde_json::json!({
             "groupId": group_id,
-            "sinceEpoch": since_epoch
+            "sinceId": since_id
         });
         Self {
             message_type: "system".into(),
@@ -837,6 +881,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -869,6 +914,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 
@@ -887,6 +933,7 @@ impl MixnetMessage {
             payload,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         }
     }
 }

@@ -157,6 +157,7 @@ mod tests {
             payload: json!({}),
             signature: "test_signature".to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            server_time: None,
         };
 
         Incoming {

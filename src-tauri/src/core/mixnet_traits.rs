@@ -50,7 +50,7 @@ pub trait MixnetSender: Send + Sync {
         -> Result<()>;
 
     /// Acknowledge receipt of pending messages so the server can delete them
-    async fn send_ack(&self, username: &str, pending_ids: &[i64]) -> Result<()>;
+    async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()>;
 
     // ========== Direct Messaging Methods ==========
 
@@ -285,12 +285,12 @@ pub trait MixnetSender: Send + Sync {
         group_server_address: &str,
     ) -> Result<()>;
 
-    /// Request epoch sync from the group server
+    /// Request commit sync from the group server using cursor-based pagination
     async fn sync_epoch_from_server(
         &self,
         username: &str,
         group_id: &str,
-        since_epoch: i64,
+        since_id: i64,
         signature: &str,
         group_server_address: &str,
     ) -> Result<()>;

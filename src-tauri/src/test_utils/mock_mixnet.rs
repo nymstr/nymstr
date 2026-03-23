@@ -217,7 +217,7 @@ impl MixnetSender for MockMixnetService {
         self.send_to_server(&msg).await
     }
 
-    async fn send_ack(&self, username: &str, pending_ids: &[i64]) -> Result<()> {
+    async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()> {
         let msg = MixnetMessage::ack(username, pending_ids);
         self.send_to_server(&msg).await
     }
@@ -324,6 +324,7 @@ impl MixnetSender for MockMixnetService {
             payload: payload_inner,
             signature: signature.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
         };
         self.record_send(server_addr, msg, None).await;
         Ok(())
@@ -568,11 +569,11 @@ impl MixnetSender for MockMixnetService {
         &self,
         username: &str,
         group_id: &str,
-        since_epoch: i64,
+        since_id: i64,
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        let msg = MixnetMessage::sync_epoch(username, group_id, since_epoch, signature);
+        let msg = MixnetMessage::sync_epoch(username, group_id, since_id, signature);
         self.record_send(group_server_address, msg, None).await;
         Ok(())
     }

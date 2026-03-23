@@ -410,17 +410,17 @@ pub async fn fetch_group_messages(
                     // Decode MLS group ID to bytes to check if group exists
                     if let Ok(group_id_bytes) = base64::engine::general_purpose::STANDARD.decode(&mls_group_id) {
                         if mls_client.group_exists(&group_id_bytes) {
-                            // Sign epoch sync request: "groupId:epoch"
-                            // We request sync from epoch 0 to get all commits, MLS will handle deduplication
-                            let epoch = 0i64; // Request all commits, let server filter
-                            let sign_content = format!("{}:{}", mls_group_id, epoch);
+                            // Sign commit sync request: "groupId:sinceId"
+                            // We request from id 0 to get all commits, MLS will handle deduplication
+                            let since_id = 0i64; // Request all commits from the beginning
+                            let sign_content = format!("{}:{}", mls_group_id, since_id);
                             if let Ok(sync_sig) = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase) {
-                                tracing::debug!("Sending epoch sync request for group {} before fetch", group_address);
+                                tracing::debug!("Sending commit sync request for group {} before fetch", group_address);
                                 let _ = service
                                     .sync_epoch_from_server(
                                         &current_user.username,
                                         &mls_group_id,
-                                        epoch,
+                                        since_id,
                                         &sync_sig,
                                         &group_address,
                                     )

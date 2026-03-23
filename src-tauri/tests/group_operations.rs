@@ -278,7 +278,7 @@ async fn test_buffer_commit_format() -> Result<()> {
     Ok(())
 }
 
-/// Test sync epoch message format
+/// Test sync epoch message format (cursor-based with sinceId)
 #[tokio::test]
 async fn test_sync_epoch_format() -> Result<()> {
     let msg = MixnetMessage::sync_epoch("alice", "group-123", 3, "signature");
@@ -286,7 +286,7 @@ async fn test_sync_epoch_format() -> Result<()> {
     assert_eq!(msg.message_type, "system");
     assert_eq!(msg.action, "syncEpoch");
     assert_eq!(msg.payload["groupId"], "group-123");
-    assert_eq!(msg.payload["sinceEpoch"], 3);
+    assert_eq!(msg.payload["sinceId"], 3);
 
     Ok(())
 }

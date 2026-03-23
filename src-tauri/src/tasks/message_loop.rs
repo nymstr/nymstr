@@ -40,19 +40,19 @@ pub fn start_message_receive_loop(
     tokio::spawn(async move {
         tracing::info!("Message receive loop started");
         let emitter = EventEmitter::new(app_handle.clone());
-        let mut seen_pending_ids: HashSet<i64> = HashSet::new();
+        let mut seen_pending_ids: HashSet<String> = HashSet::new();
 
         while let Some(incoming) = rx.recv().await {
             // Dedup by pendingId: a message may arrive via both SURB and fetchPending
-            let pending_id = incoming.envelope.payload.get("pendingId").and_then(|v| v.as_i64());
-            if let Some(pid) = pending_id {
-                if seen_pending_ids.contains(&pid) {
+            let pending_id = incoming.envelope.payload.get("pendingId").and_then(|v| v.as_str()).map(|s| s.to_string());
+            if let Some(ref pid) = pending_id {
+                if seen_pending_ids.contains(pid) {
                     tracing::debug!("Dedup: skipping already-seen pendingId {}", pid);
                     // Still ACK to ensure server cleans up
-                    send_ack_batch(&state, &[pid]).await;
+                    send_ack_batch(&state, &[pid.clone()]).await;
                     continue;
                 }
-                seen_pending_ids.insert(pid);
+                seen_pending_ids.insert(pid.clone());
                 if seen_pending_ids.len() > DEDUP_SET_CAPACITY {
                     seen_pending_ids.clear();
                 }
@@ -78,8 +78,8 @@ pub fn start_message_receive_loop(
             }
 
             // ACK after successful processing
-            if let Some(pid) = pending_id {
-                send_ack_batch(&state, &[pid]).await;
+            if let Some(ref pid) = pending_id {
+                send_ack_batch(&state, &[pid.clone()]).await;
             }
         }
 
@@ -94,6 +94,17 @@ async fn process_message(
     incoming: &Incoming,
     route: MessageRoute,
 ) -> anyhow::Result<()> {
+    // Extract serverTime from every response to maintain server-relative clock
+    if let Some(server_time) = incoming.envelope.server_time {
+        // Determine server identifier from sender field
+        let server_id = match incoming.envelope.sender.as_str() {
+            "server" => "discovery".to_string(),
+            "group-server" => "group-server".to_string(),
+            other => other.to_string(),
+        };
+        state.update_server_time(&server_id, server_time).await;
+    }
+
     // Verify server signatures for server-origin messages
     let is_server_message = matches!(
         route,
@@ -576,7 +587,7 @@ async fn handle_group_message(
         }
 
         "syncEpochResponse" => {
-            tracing::info!("Received epoch sync response");
+            tracing::info!("Received commit sync response");
 
             let content = payload
                 .get("content")
@@ -584,33 +595,28 @@ async fn handle_group_message(
                 .unwrap_or("{}");
 
             if content.starts_with("error:") {
-                tracing::warn!("Epoch sync failed: {}", content);
+                tracing::warn!("Commit sync failed: {}", content);
                 return Ok(());
             }
 
             // Parse the sync response
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(content) {
-                let current_epoch = parsed.get("currentEpoch").and_then(|v| v.as_i64());
                 let group_id = parsed.get("groupId").and_then(|v| v.as_str());
-
-                if let Some(epoch) = current_epoch {
-                    tracing::info!("Server current epoch: {}", epoch);
-                }
 
                 // Process any buffered commits
                 if let Some(commits) = parsed.get("commits").and_then(|v| v.as_array()) {
                     if commits.is_empty() {
-                        tracing::debug!("No commits to process in epoch sync");
+                        tracing::debug!("No commits to process in commit sync");
                         return Ok(());
                     }
 
-                    tracing::info!("Processing {} buffered commits for epoch catch-up", commits.len());
+                    tracing::info!("Processing {} buffered commits for catch-up", commits.len());
 
                     // Get MLS client to process commits
                     let current_user = match state.get_current_user().await {
                         Some(u) => u,
                         None => {
-                            tracing::warn!("Cannot process epoch sync: no user logged in");
+                            tracing::warn!("Cannot process commit sync: no user logged in");
                             return Ok(());
                         }
                     };
@@ -618,7 +624,7 @@ async fn handle_group_message(
                     let (secret_key, public_key, passphrase) = match state.get_pgp_keys().await {
                         Some(keys) => keys,
                         None => {
-                            tracing::warn!("Cannot process epoch sync: PGP keys not available");
+                            tracing::warn!("Cannot process commit sync: PGP keys not available");
                             return Ok(());
                         }
                     };
@@ -632,7 +638,7 @@ async fn handle_group_message(
                     ) {
                         Ok(c) => c,
                         Err(e) => {
-                            tracing::warn!("Cannot process epoch sync: failed to create MLS client: {}", e);
+                            tracing::warn!("Cannot process commit sync: failed to create MLS client: {}", e);
                             return Ok(());
                         }
                     };
@@ -641,32 +647,40 @@ async fn handle_group_message(
                     let mls_group_id = match group_id {
                         Some(id) => id.to_string(),
                         None => {
-                            tracing::warn!("Cannot process epoch sync: no group ID in response");
+                            tracing::warn!("Cannot process commit sync: no group ID in response");
                             return Ok(());
                         }
                     };
 
-                    // Process each commit in order
+                    // Process each commit in order (ordered by sequential id from server)
                     for commit_obj in commits {
+                        let commit_id = commit_obj.get("id").and_then(|v| v.as_i64());
                         let commit_epoch = commit_obj.get("epoch").and_then(|v| v.as_i64());
                         let commit_b64 = commit_obj.get("commit").and_then(|v| v.as_str());
 
                         if let (Some(epoch), Some(commit_data)) = (commit_epoch, commit_b64) {
-                            tracing::debug!("Processing commit for epoch {}", epoch);
+                            tracing::debug!(
+                                "Processing commit id={:?} epoch={} for group {}",
+                                commit_id,
+                                epoch,
+                                mls_group_id
+                            );
 
                             match base64::engine::general_purpose::STANDARD.decode(commit_data) {
                                 Ok(commit_bytes) => {
                                     match mls_client.process_commit(&mls_group_id, &commit_bytes) {
                                         Ok(new_epoch) => {
                                             tracing::info!(
-                                                "Advanced to epoch {} after processing commit",
-                                                new_epoch
+                                                "Advanced to epoch {} after processing commit (server id={:?})",
+                                                new_epoch,
+                                                commit_id
                                             );
                                         }
                                         Err(e) => {
                                             // This might happen if we already processed this commit
                                             tracing::debug!(
-                                                "Failed to process commit for epoch {}: {} (may already be processed)",
+                                                "Failed to process commit id={:?} epoch={}: {} (may already be processed)",
+                                                commit_id,
                                                 epoch,
                                                 e
                                             );
@@ -775,7 +789,7 @@ async fn handle_pending_delivery(
     tracing::info!("Processing {} pending messages from offline queue", count);
 
     // Collect pending message IDs for batch ACK
-    let mut acked_ids: Vec<i64> = Vec::new();
+    let mut acked_ids: Vec<String> = Vec::new();
 
     // Process each queued message
     for msg in messages {
@@ -784,9 +798,9 @@ async fn handle_pending_delivery(
         let msg_payload = msg.get("payload").cloned().unwrap_or_else(|| serde_json::json!({}));
         let timestamp = msg.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
 
-        // Collect the pending message ID for ACK
-        if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
-            acked_ids.push(id);
+        // Collect the pending message ID for ACK (now UUID strings)
+        if let Some(id) = msg.get("id").and_then(|v| v.as_str()) {
+            acked_ids.push(id.to_string());
         }
 
         tracing::debug!(
@@ -807,6 +821,7 @@ async fn handle_pending_delivery(
             timestamp: chrono::DateTime::from_timestamp(timestamp, 0)
                 .unwrap_or_else(chrono::Utc::now)
                 .to_rfc3339(),
+            server_time: None,
         };
 
         let synthetic_incoming = Incoming {
@@ -848,7 +863,10 @@ async fn handle_pending_delivery(
 }
 
 /// Send a batch ACK for processed pending messages
-async fn send_ack_batch(state: &Arc<AppState>, pending_ids: &[i64]) {
+///
+/// The server requires a PGP signature over "ack:{username}:{timestamp}:{pendingIds_comma_joined}"
+/// where timestamp is a unix epoch integer and pendingIds are comma-joined UUID strings.
+async fn send_ack_batch(state: &Arc<AppState>, pending_ids: &[String]) {
     if pending_ids.is_empty() {
         return;
     }
@@ -860,7 +878,33 @@ async fn send_ack_batch(state: &Arc<AppState>, pending_ids: &[i64]) {
         Some(s) => s,
         None => return,
     };
-    if let Err(e) = mixnet_service.send_ack(&username, pending_ids).await {
+
+    // Build the ACK message with server-relative timestamp to avoid clock skew
+    let server_ts = state.get_server_time("discovery").await;
+    let mut env = crate::core::messages::MixnetMessage::ack_with_server_time(&username, pending_ids, server_ts);
+
+    // Sign the ACK if PGP keys are available
+    if let Some((secret_key, passphrase)) = state.get_pgp_signing_keys().await {
+        let ts = env.payload.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ids_joined = pending_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",");
+        let sign_content = format!("ack:{}:{}:{}", username, ts, ids_joined);
+
+        match crate::crypto::pgp::PgpSigner::sign_detached_secure(
+            &secret_key,
+            sign_content.as_bytes(),
+            &passphrase,
+        ) {
+            Ok(signature) => {
+                env.set_signature(&signature);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sign ACK message: {}", e);
+                // Continue with placeholder — server may reject, but don't drop the ACK
+            }
+        }
+    }
+
+    if let Err(e) = mixnet_service.send_to_server(&env).await {
         tracing::warn!("Failed to send ACK for {:?}: {}", pending_ids, e);
     }
 }

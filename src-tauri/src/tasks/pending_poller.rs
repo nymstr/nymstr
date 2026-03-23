@@ -59,8 +59,8 @@ pub fn start_pending_poller(state: Arc<AppState>) -> JoinHandle<()> {
                 }
             };
 
-            // Create timestamp for signature
-            let timestamp = chrono::Utc::now().timestamp();
+            // Use server-relative timestamp to avoid clock skew issues
+            let timestamp = state.get_server_time("discovery").await;
 
             // Sign the request: "fetchPending:{username}:{timestamp}"
             let message_to_sign = format!("fetchPending:{}:{}", current_user.username, timestamp);

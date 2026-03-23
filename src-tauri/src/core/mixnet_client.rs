@@ -309,7 +309,10 @@ impl MixnetService {
     }
 
     /// Acknowledge receipt of pending messages so the server can delete them
-    pub async fn send_ack(&self, username: &str, pending_ids: &[i64]) -> Result<()> {
+    ///
+    /// The server requires a PGP signature over "ack:{username}:{timestamp}:{pendingIds_comma_joined}"
+    /// where timestamp is a unix epoch integer and pendingIds are comma-joined UUID strings.
+    pub async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()> {
         let env = MixnetMessage::ack(username, pending_ids);
         self.send_to_server(&env).await
     }
@@ -793,20 +796,20 @@ impl MixnetService {
         Ok(())
     }
 
-    /// Request epoch sync from the group server
+    /// Request commit sync from the group server using cursor-based pagination
     pub async fn sync_epoch_from_server(
         &self,
         username: &str,
         group_id: &str,
-        since_epoch: i64,
+        since_id: i64,
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        let env = MixnetMessage::sync_epoch(username, group_id, since_epoch, signature);
+        let env = MixnetMessage::sync_epoch(username, group_id, since_id, signature);
         log::info!(
-            "Requesting epoch sync for group {} since epoch {} from server {}",
+            "Requesting commit sync for group {} since id {} from server {}",
             group_id,
-            since_epoch,
+            since_id,
             group_server_address
         );
         self.send_message_to(group_server_address, &env).await?;
@@ -893,7 +896,7 @@ impl MixnetSender for MixnetService {
         MixnetService::send_fetch_pending(self, username, timestamp, signature).await
     }
 
-    async fn send_ack(&self, username: &str, pending_ids: &[i64]) -> Result<()> {
+    async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()> {
         MixnetService::send_ack(self, username, pending_ids).await
     }
 
@@ -1203,7 +1206,7 @@ impl MixnetSender for MixnetService {
         &self,
         username: &str,
         group_id: &str,
-        since_epoch: i64,
+        since_id: i64,
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
@@ -1211,7 +1214,7 @@ impl MixnetSender for MixnetService {
             self,
             username,
             group_id,
-            since_epoch,
+            since_id,
             signature,
             group_server_address,
         ).await
