@@ -3,6 +3,14 @@ name = "server-rust"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "server-rust"
+path = "src/main.rs"
+
+[lib]
+name = "server_rust"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
@@ -25,8 +33,10 @@ pgp = "0.16"
 rand = "0.8"
 bip39 = "2.0"
 ed25519-zebra = { version = "4.1", features = ["alloc"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
 tokio-test = "0.4"
 rand = "0.8"
+chrono = "0.4"

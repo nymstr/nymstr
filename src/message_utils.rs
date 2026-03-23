@@ -2,9 +2,8 @@ use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::{DbUtils, QueryResult};
 use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
 use crate::rate_limiter::RateLimiter;
-use nym_sdk::mixnet::{
-    AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage,
-};
+use crate::transport::{ReplyTag, ReplySender};
+use nym_sdk::mixnet::ReconstructedMessage;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -14,13 +13,15 @@ use uuid::Uuid;
 pub struct MessageUtils {
     db: DbUtils,
     crypto: CryptoUtils,
-    sender: MixnetClientSender,
+    sender: Box<dyn ReplySender>,
     client_id: String,
-    pending_users: HashMap<AnonymousSenderTag, PendingEntry<PendingUserData>>,
-    nonces: HashMap<AnonymousSenderTag, PendingEntry<PendingLoginData>>,
-    pending_groups: HashMap<AnonymousSenderTag, PendingEntry<PendingGroupData>>,
+    pending_users: HashMap<ReplyTag, PendingEntry<PendingUserData>>,
+    nonces: HashMap<ReplyTag, PendingEntry<PendingLoginData>>,
+    pending_groups: HashMap<ReplyTag, PendingEntry<PendingGroupData>>,
     /// Rate limiter for authentication endpoints (registration/login)
     rate_limiter: RateLimiter,
+    /// Rate limiter for send operations (message relay)
+    send_rate_limiter: RateLimiter,
 }
 
 impl MessageUtils {
@@ -33,10 +34,16 @@ impl MessageUtils {
     /// Rate limit window in seconds (1 minute)
     const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
+    /// Maximum send operations per sender within the rate limit window
+    const SEND_RATE_LIMIT_MAX: usize = 60;
+
+    /// Send rate limit window in seconds (1 minute)
+    const SEND_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
     /// Create a new MessageUtils instance.
     pub fn new(
         client_id: String,
-        sender: MixnetClientSender,
+        sender: Box<dyn ReplySender>,
         db: DbUtils,
         crypto: CryptoUtils,
     ) -> Self {
@@ -51,6 +58,10 @@ impl MessageUtils {
             rate_limiter: RateLimiter::new(
                 Self::RATE_LIMIT_MAX_ATTEMPTS,
                 Self::RATE_LIMIT_WINDOW_SECS,
+            ),
+            send_rate_limiter: RateLimiter::new(
+                Self::SEND_RATE_LIMIT_MAX,
+                Self::SEND_RATE_LIMIT_WINDOW_SECS,
             ),
         }
     }
@@ -107,20 +118,27 @@ impl MessageUtils {
 
         // Clean up rate limiter entries with no recent attempts
         self.rate_limiter.cleanup();
+        self.send_rate_limiter.cleanup();
     }
 
-    /// Process an incoming mixnet message.
+    /// Process an incoming Nym mixnet message (convenience wrapper).
     pub async fn process_received_message(&mut self, msg: ReconstructedMessage) {
+        let tag = msg.sender_tag.map(ReplyTag::from);
+        self.process_message(tag, msg.message).await;
+    }
+
+    /// Process an incoming message from any transport.
+    pub async fn process_message(&mut self, sender_tag: Option<ReplyTag>, raw_bytes: Vec<u8>) {
         // Clean up stale pending entries on each message to prevent memory leaks
         self.cleanup_stale_entries();
 
-        let sender_tag = if let Some(tag) = msg.sender_tag {
+        let sender_tag = if let Some(tag) = sender_tag {
             tag
         } else {
             log::warn!("Received message without sender tag, ignoring");
             return;
         };
-        let raw = match String::from_utf8(msg.message) {
+        let raw = match String::from_utf8(raw_bytes) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Invalid UTF-8 in message: {}", e);
@@ -268,7 +286,7 @@ impl MessageUtils {
         }
     }
 
-    async fn handle_query(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_query(&mut self, data: &Value, sender_tag: ReplyTag) {
         // Support both "username" (legacy) and "identifier" (unified) fields
         let identifier = data
             .get("identifier")
@@ -299,7 +317,7 @@ impl MessageUtils {
                         "publicKey": public_key
                     })
                     .to_string();
-                    self.send_encapsulated_reply(sender_tag, reply, "queryResponse", Some("query"))
+                    self.send_encapsulated_reply(&sender_tag, reply, "queryResponse", Some("query"))
                         .await;
                 }
                 Some(QueryResult::Group {
@@ -318,12 +336,12 @@ impl MessageUtils {
                         "description": description
                     })
                     .to_string();
-                    self.send_encapsulated_reply(sender_tag, reply, "queryResponse", Some("query"))
+                    self.send_encapsulated_reply(&sender_tag, reply, "queryResponse", Some("query"))
                         .await;
                 }
                 None => {
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "No user or group found".into(),
                         "queryResponse",
                         Some("query"),
@@ -333,7 +351,7 @@ impl MessageUtils {
             }
         } else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing 'username' or 'identifier' field".into(),
                 "queryResponse",
                 Some("query"),
@@ -342,7 +360,7 @@ impl MessageUtils {
         }
     }
 
-    async fn handle_register(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_register(&mut self, data: &Value, sender_tag: ReplyTag) {
         // Rate limit check for registration attempts
         let rate_key = sender_tag.to_string();
         if !self.rate_limiter.check_and_record(&rate_key) {
@@ -351,7 +369,7 @@ impl MessageUtils {
                 sender_tag
             );
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: rate limit exceeded, please try again later".into(),
                 "challengeResponse",
                 Some("registration"),
@@ -369,7 +387,7 @@ impl MessageUtils {
         );
         if username.is_none() || public_key.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing username or public key".into(),
                 "challengeResponse",
                 Some("registration"),
@@ -381,7 +399,7 @@ impl MessageUtils {
         let pubkey = public_key.unwrap();
         if !Self::is_valid_username(username) {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: invalid username format".into(),
                 "challengeResponse",
                 Some("registration"),
@@ -395,7 +413,7 @@ impl MessageUtils {
             Err(e) => {
                 log::error!("Database error checking username '{}': {}", username, e);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     json!({"status": "error", "error_code": "INTERNAL_ERROR", "message": "Database error"}).to_string(),
                     "challengeResponse",
                     Some("registration"),
@@ -405,7 +423,7 @@ impl MessageUtils {
         };
         if user_exists {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 json!({"status": "error", "error_code": "USER_EXISTS", "message": "Username already in use"}).to_string(),
                 "challengeResponse",
                 Some("registration"),
@@ -416,11 +434,11 @@ impl MessageUtils {
         let nonce = Uuid::new_v4().to_string();
         log::debug!("Generated nonce for user '{}': {}", username, nonce);
         self.pending_users.insert(
-            sender_tag,
+            sender_tag.clone(),
             PendingEntry::new((username.to_string(), pubkey.to_string(), nonce.clone())),
         );
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             json!({"nonce": nonce}).to_string(),
             "challenge",
             Some("registration"),
@@ -428,7 +446,7 @@ impl MessageUtils {
         .await;
     }
 
-    async fn handle_registration_response(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_registration_response(&mut self, data: &Value, sender_tag: ReplyTag) {
         let signature = data.get("signature").and_then(Value::as_str);
         log::debug!(
             "Registration response - has_signature: {}",
@@ -436,7 +454,7 @@ impl MessageUtils {
         );
         if signature.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing signature".into(),
                 "challengeResponse",
                 Some("registration"),
@@ -462,7 +480,7 @@ impl MessageUtils {
                 {
                     log::info!("Registration successful for user '{}'", username);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "success".into(),
                         "challengeResponse",
                         Some("registration"),
@@ -474,7 +492,7 @@ impl MessageUtils {
                         username
                     );
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: database failure".into(),
                         "challengeResponse",
                         Some("registration"),
@@ -484,7 +502,7 @@ impl MessageUtils {
             } else {
                 log::warn!("Signature verification failed for user '{}'", username);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: signature verification failed".into(),
                     "challengeResponse",
                     Some("registration"),
@@ -493,7 +511,7 @@ impl MessageUtils {
             }
         } else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: no pending registration".into(),
                 "challengeResponse",
                 Some("registration"),
@@ -502,7 +520,7 @@ impl MessageUtils {
         }
     }
 
-    async fn handle_login(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_login(&mut self, data: &Value, sender_tag: ReplyTag) {
         // Rate limit check for login attempts
         let rate_key = sender_tag.to_string();
         if !self.rate_limiter.check_and_record(&rate_key) {
@@ -511,7 +529,7 @@ impl MessageUtils {
                 sender_tag
             );
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: rate limit exceeded, please try again later".into(),
                 "challengeResponse",
                 Some("login"),
@@ -523,7 +541,7 @@ impl MessageUtils {
         let username = data.get("username").and_then(Value::as_str);
         if username.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing username".into(),
                 "challengeResponse",
                 Some("login"),
@@ -537,11 +555,11 @@ impl MessageUtils {
         {
             let nonce = Uuid::new_v4().to_string();
             self.nonces.insert(
-                sender_tag,
+                sender_tag.clone(),
                 PendingEntry::new((username.to_string(), pubkey, nonce.clone())),
             );
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 json!({"nonce": nonce}).to_string(),
                 "challenge",
                 Some("login"),
@@ -549,7 +567,7 @@ impl MessageUtils {
             .await;
         } else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: user not found".into(),
                 "challengeResponse",
                 Some("login"),
@@ -558,11 +576,11 @@ impl MessageUtils {
         }
     }
 
-    async fn handle_login_response(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_login_response(&mut self, data: &Value, sender_tag: ReplyTag) {
         let signature = data.get("signature").and_then(Value::as_str);
         if signature.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing signature".into(),
                 "challengeResponse",
                 Some("login"),
@@ -591,7 +609,7 @@ impl MessageUtils {
                     }
                 }
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "success".into(),
                     "challengeResponse",
                     Some("login"),
@@ -599,7 +617,7 @@ impl MessageUtils {
                 .await;
             } else {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: invalid signature".into(),
                     "challengeResponse",
                     Some("login"),
@@ -608,7 +626,7 @@ impl MessageUtils {
             }
         } else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: no pending login".into(),
                 "challengeResponse",
                 Some("login"),
@@ -652,7 +670,7 @@ impl MessageUtils {
         sender_username: &str,
         recipient_username: &str,
         content: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
         let Some((_u2, _pk2, target_sender_tag)) = self
             .db
@@ -661,7 +679,7 @@ impl MessageUtils {
             .unwrap_or(None)
         else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: recipient not found".into(),
                 "sendResponse",
                 Some("chat"),
@@ -670,7 +688,7 @@ impl MessageUtils {
             return;
         };
 
-        if let Ok(tag) = AnonymousSenderTag::try_from_base58_string(&target_sender_tag) {
+        if let Some(tag) = ReplyTag::from_stored_string(&target_sender_tag) {
             let mut forward = json!({
                 "sender": sender_username,
                 "body": content.get("body").cloned().unwrap_or(Value::Null)
@@ -678,20 +696,20 @@ impl MessageUtils {
             if let Some(spk) = content.get("senderPublicKey") {
                 forward["senderPublicKey"] = spk.clone();
             }
-            self.send_encapsulated_reply(tag, forward.to_string(), "incomingMessage", Some("chat"))
+            self.send_encapsulated_reply(&tag, forward.to_string(), "incomingMessage", Some("chat"))
                 .await;
         }
 
-        self.send_encapsulated_reply(sender_tag, "success".into(), "sendResponse", Some("chat"))
+        self.send_encapsulated_reply(&sender_tag, "success".into(), "sendResponse", Some("chat"))
             .await;
     }
 
-    async fn handle_send(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_send(&mut self, data: &Value, sender_tag: ReplyTag) {
         // Validate request and parse content
         let (content_str, signature, content) = match Self::validate_send_request(data) {
             Ok(v) => v,
             Err(msg) => {
-                self.send_encapsulated_reply(sender_tag, msg.into(), "sendResponse", Some("chat"))
+                self.send_encapsulated_reply(&sender_tag, msg.into(), "sendResponse", Some("chat"))
                     .await;
                 return;
             }
@@ -701,7 +719,7 @@ impl MessageUtils {
         let (sender_username, recipient_username) = match Self::extract_usernames(&content) {
             Ok(v) => v,
             Err(msg) => {
-                self.send_encapsulated_reply(sender_tag, msg.into(), "sendResponse", Some("chat"))
+                self.send_encapsulated_reply(&sender_tag, msg.into(), "sendResponse", Some("chat"))
                     .await;
                 return;
             }
@@ -715,7 +733,7 @@ impl MessageUtils {
             .unwrap_or(None)
         else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: unrecognized sender username".into(),
                 "sendResponse",
                 Some("chat"),
@@ -729,7 +747,7 @@ impl MessageUtils {
             .verify_signature(&pubkey, content_str, signature)
         {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: invalid signature".into(),
                 "sendResponse",
                 Some("chat"),
@@ -758,40 +776,40 @@ impl MessageUtils {
             .await;
     }
 
-    async fn handle_create_group(&mut self, _data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_create_group(&mut self, _data: &Value, sender_tag: ReplyTag) {
         log::warn!("handleCreateGroup - stubs not implemented");
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             "error: unimplemented".into(),
             "createGroupResponse",
             None,
         )
         .await;
     }
-    async fn handle_send_group(&mut self, _data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_send_group(&mut self, _data: &Value, sender_tag: ReplyTag) {
         log::warn!("handleSendGroup - stubs not implemented");
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             "error: unimplemented".into(),
             "sendGroupResponse",
             None,
         )
         .await;
     }
-    async fn handle_send_invite(&mut self, _data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_send_invite(&mut self, _data: &Value, sender_tag: ReplyTag) {
         log::warn!("handleSendInvite - stubs not implemented");
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             "error: unimplemented".into(),
             "inviteGroupResponse",
             None,
         )
         .await;
     }
-    async fn handle_update(&mut self, _data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_update(&mut self, _data: &Value, sender_tag: ReplyTag) {
         log::warn!("handleUpdate - stubs not implemented");
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             "error: unimplemented".into(),
             "updateResponse",
             None,
@@ -802,7 +820,7 @@ impl MessageUtils {
     // ===== GROUP SERVER REGISTRATION =====
 
     /// Handle a group server registration request (step 1: send challenge)
-    async fn handle_register_group(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_register_group(&mut self, data: &Value, sender_tag: ReplyTag) {
         let group_id = data.get("groupId").and_then(Value::as_str);
         let name = data.get("name").and_then(Value::as_str);
         let nym_address = data.get("nymAddress").and_then(Value::as_str);
@@ -822,7 +840,7 @@ impl MessageUtils {
         // Validate required fields
         if group_id.is_none() || name.is_none() || nym_address.is_none() || public_key.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing required fields (groupId, name, nymAddress, publicKey)".into(),
                 "registerGroupResponse",
                 Some("registration"),
@@ -839,7 +857,7 @@ impl MessageUtils {
         // Validate group_id format
         if !Self::is_valid_group_id(group_id) {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: invalid groupId format".into(),
                 "registerGroupResponse",
                 Some("registration"),
@@ -859,7 +877,7 @@ impl MessageUtils {
                 );
             } else {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: groupId already registered with different key".into(),
                     "registerGroupResponse",
                     Some("registration"),
@@ -875,7 +893,7 @@ impl MessageUtils {
 
         // Store pending registration
         self.pending_groups.insert(
-            sender_tag,
+            sender_tag.clone(),
             PendingEntry::new(PendingGroupData {
                 group_id: group_id.to_string(),
                 name: name.to_string(),
@@ -889,7 +907,7 @@ impl MessageUtils {
 
         // Send challenge
         self.send_encapsulated_reply(
-            sender_tag,
+            &sender_tag,
             json!({"nonce": nonce}).to_string(),
             "challenge",
             Some("groupRegistration"),
@@ -901,13 +919,13 @@ impl MessageUtils {
     async fn handle_register_group_response(
         &mut self,
         data: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
         let signature = data.get("signature").and_then(Value::as_str);
 
         if signature.is_none() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing signature".into(),
                 "registerGroupResponse",
                 Some("registration"),
@@ -960,7 +978,7 @@ impl MessageUtils {
                     Ok(true) => {
                         log::info!("Group '{}' registered successfully", pending.group_id);
                         self.send_encapsulated_reply(
-                            sender_tag,
+                            &sender_tag,
                             "success".into(),
                             "registerGroupResponse",
                             Some("registration"),
@@ -973,7 +991,7 @@ impl MessageUtils {
                             pending.group_id
                         );
                         self.send_encapsulated_reply(
-                            sender_tag,
+                            &sender_tag,
                             "error: database failure".into(),
                             "registerGroupResponse",
                             Some("registration"),
@@ -987,7 +1005,7 @@ impl MessageUtils {
                     pending.group_id
                 );
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: signature verification failed".into(),
                     "registerGroupResponse",
                     Some("registration"),
@@ -996,7 +1014,7 @@ impl MessageUtils {
             }
         } else {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: no pending group registration".into(),
                 "registerGroupResponse",
                 Some("registration"),
@@ -1006,7 +1024,7 @@ impl MessageUtils {
     }
 
     /// Handle query for discoverable groups
-    async fn handle_query_groups(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_query_groups(&mut self, data: &Value, sender_tag: ReplyTag) {
         let group_id = data.get("groupId").and_then(Value::as_str);
 
         if let Some(gid) = group_id {
@@ -1025,7 +1043,7 @@ impl MessageUtils {
                         })
                         .to_string();
                         self.send_encapsulated_reply(
-                            sender_tag,
+                            &sender_tag,
                             reply,
                             "queryGroupsResponse",
                             None,
@@ -1033,7 +1051,7 @@ impl MessageUtils {
                         .await;
                     } else {
                         self.send_encapsulated_reply(
-                            sender_tag,
+                            &sender_tag,
                             json!({"groups": []}).to_string(),
                             "queryGroupsResponse",
                             None,
@@ -1043,7 +1061,7 @@ impl MessageUtils {
                 }
                 _ => {
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         json!({"groups": []}).to_string(),
                         "queryGroupsResponse",
                         None,
@@ -1068,13 +1086,13 @@ impl MessageUtils {
                         })
                         .collect();
                     let reply = json!({"groups": group_list}).to_string();
-                    self.send_encapsulated_reply(sender_tag, reply, "queryGroupsResponse", None)
+                    self.send_encapsulated_reply(&sender_tag, reply, "queryGroupsResponse", None)
                         .await;
                 }
                 Err(e) => {
                     log::error!("Failed to query groups: {}", e);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: database failure".into(),
                         "queryGroupsResponse",
                         None,
@@ -1090,7 +1108,7 @@ impl MessageUtils {
     async fn handle_query_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
     ) {
         // Support both "username" (legacy) and "identifier" (unified) fields
@@ -1123,7 +1141,7 @@ impl MessageUtils {
                         "publicKey": public_key
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "queryResponse",
                         sender_username,
@@ -1146,7 +1164,7 @@ impl MessageUtils {
                         "description": description
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "queryResponse",
                         sender_username,
@@ -1156,7 +1174,7 @@ impl MessageUtils {
                 None => {
                     let response_payload = json!({"error": "No user or group found"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "queryResponse",
                         sender_username,
@@ -1167,7 +1185,7 @@ impl MessageUtils {
         } else {
             let response_payload = json!({"error": "missing 'username' or 'identifier' field"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "queryResponse",
                 sender_username,
@@ -1179,7 +1197,7 @@ impl MessageUtils {
     async fn handle_register_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
     ) {
         // Rate limit check for registration attempts
@@ -1191,7 +1209,7 @@ impl MessageUtils {
             );
             let response_payload = json!({"result": "error", "context": "registration", "message": "rate limit exceeded, please try again later"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "challengeResponse",
                 sender_username,
@@ -1207,7 +1225,7 @@ impl MessageUtils {
             if !Self::is_valid_username(username) {
                 let response_payload = json!({"result": "error", "context": "registration", "message": "invalid username"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "challengeResponse",
                     sender_username,
@@ -1225,7 +1243,7 @@ impl MessageUtils {
             {
                 let response_payload = json!({"result": "error", "context": "registration", "message": "user already exists"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "challengeResponse",
                     sender_username,
@@ -1237,17 +1255,17 @@ impl MessageUtils {
             // Send challenge
             let nonce = Uuid::new_v4().to_string();
             self.pending_users.insert(
-                sender_tag,
+                sender_tag.clone(),
                 PendingEntry::new((username.to_string(), public_key.to_string(), nonce.clone())),
             );
 
             let challenge_payload = json!({"nonce": nonce, "context": "registration"});
-            self.send_unified_reply(sender_tag, challenge_payload, "challenge", sender_username)
+            self.send_unified_reply(&sender_tag, challenge_payload, "challenge", sender_username)
                 .await;
         } else {
             let response_payload = json!({"result": "error", "context": "registration", "message": "missing username or publicKey"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "challengeResponse",
                 sender_username,
@@ -1259,7 +1277,7 @@ impl MessageUtils {
     async fn handle_registration_response_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
         let signature = payload.get("signature").and_then(Value::as_str);
 
@@ -1283,7 +1301,7 @@ impl MessageUtils {
                         log::error!("Failed to register user in DB: {}", e);
                         let response_payload = json!({"result": "error", "context": "registration", "message": "database error"});
                         self.send_unified_reply(
-                            sender_tag,
+                            &sender_tag,
                             response_payload,
                             "challengeResponse",
                             &username,
@@ -1298,7 +1316,7 @@ impl MessageUtils {
                         let response_payload =
                             json!({"result": "success", "context": "registration"});
                         self.send_unified_reply(
-                            sender_tag,
+                            &sender_tag,
                             response_payload,
                             "challengeResponse",
                             &username,
@@ -1312,7 +1330,7 @@ impl MessageUtils {
                     );
                     let response_payload = json!({"result": "error", "context": "registration", "message": "invalid signature"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "challengeResponse",
                         &username,
@@ -1326,7 +1344,7 @@ impl MessageUtils {
                 );
                 let response_payload = json!({"result": "error", "context": "registration", "message": "no pending registration"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "challengeResponse",
                     "unknown",
@@ -1336,7 +1354,7 @@ impl MessageUtils {
         } else {
             log::warn!("Registration response missing signature field");
             let response_payload = json!({"result": "error", "context": "registration", "message": "missing signature"});
-            self.send_unified_reply(sender_tag, response_payload, "challengeResponse", "unknown")
+            self.send_unified_reply(&sender_tag, response_payload, "challengeResponse", "unknown")
                 .await;
         }
     }
@@ -1344,7 +1362,7 @@ impl MessageUtils {
     async fn handle_login_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
     ) {
         // Rate limit check for login attempts
@@ -1356,7 +1374,7 @@ impl MessageUtils {
             );
             let response_payload = json!({"result": "error", "context": "login", "message": "rate limit exceeded, please try again later"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "challengeResponse",
                 sender_username,
@@ -1370,13 +1388,13 @@ impl MessageUtils {
             if let Ok(Some((_, public_key, _))) = self.db.get_user_by_username(username).await {
                 let nonce = Uuid::new_v4().to_string();
                 self.nonces.insert(
-                    sender_tag,
+                    sender_tag.clone(),
                     PendingEntry::new((username.to_string(), public_key, nonce.clone())),
                 );
 
                 let challenge_payload = json!({"nonce": nonce, "context": "login"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     challenge_payload,
                     "challenge",
                     sender_username,
@@ -1386,7 +1404,7 @@ impl MessageUtils {
                 let response_payload =
                     json!({"result": "error", "context": "login", "message": "user not found"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "challengeResponse",
                     sender_username,
@@ -1397,7 +1415,7 @@ impl MessageUtils {
             let response_payload =
                 json!({"result": "error", "context": "login", "message": "missing username"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "challengeResponse",
                 sender_username,
@@ -1409,7 +1427,7 @@ impl MessageUtils {
     async fn handle_login_response_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
         let signature = payload.get("signature").and_then(Value::as_str);
 
@@ -1436,7 +1454,7 @@ impl MessageUtils {
 
                     let response_payload = json!({"result": "success", "context": "login"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "challengeResponse",
                         &username,
@@ -1445,7 +1463,7 @@ impl MessageUtils {
                 } else {
                     let response_payload = json!({"result": "error", "context": "login", "message": "invalid signature"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "challengeResponse",
                         &username,
@@ -1456,7 +1474,7 @@ impl MessageUtils {
                 let response_payload =
                     json!({"result": "error", "context": "login", "message": "no pending login"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "challengeResponse",
                     "unknown",
@@ -1466,7 +1484,7 @@ impl MessageUtils {
         } else {
             let response_payload =
                 json!({"result": "error", "context": "login", "message": "missing signature"});
-            self.send_unified_reply(sender_tag, response_payload, "challengeResponse", "unknown")
+            self.send_unified_reply(&sender_tag, response_payload, "challengeResponse", "unknown")
                 .await;
         }
     }
@@ -1474,7 +1492,7 @@ impl MessageUtils {
     async fn handle_send_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1483,6 +1501,103 @@ impl MessageUtils {
             sender_username,
             payload
         );
+
+        // Rate limit check for send operations
+        let rate_key = sender_tag.to_string();
+        if !self.send_rate_limiter.check_and_record(&rate_key) {
+            log::warn!(
+                "Rate limit exceeded for send from sender_tag={:?} (user={})",
+                sender_tag,
+                sender_username
+            );
+            let response_payload = json!({"status": "error", "message": "rate limit exceeded, please try again later"});
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "sendResponse",
+                sender_username,
+            )
+            .await;
+            return;
+        }
+
+        // Verify sender exists and signature is valid
+        let sender_data = match self.db.get_user_by_username(sender_username).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                log::warn!(
+                    "Send rejected: sender {} not registered",
+                    sender_username
+                );
+                let response_payload =
+                    json!({"status": "error", "message": "sender not registered"});
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "sendResponse",
+                    sender_username,
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                log::error!("Send: database error looking up {}: {}", sender_username, e);
+                let response_payload =
+                    json!({"status": "error", "message": "database error"});
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "sendResponse",
+                    sender_username,
+                )
+                .await;
+                return;
+            }
+        };
+
+        let public_key = &sender_data.1;
+
+        // Require and verify PGP signature over the payload
+        let signature = match payload.get("signature").and_then(Value::as_str) {
+            Some(sig) => sig,
+            None => {
+                log::warn!(
+                    "Send from {} rejected: missing signature",
+                    sender_username
+                );
+                let response_payload =
+                    json!({"status": "error", "message": "missing signature"});
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "sendResponse",
+                    sender_username,
+                )
+                .await;
+                return;
+            }
+        };
+
+        let payload_str = serde_json::to_string(payload).unwrap_or_default();
+        if !self
+            .crypto
+            .verify_signature(public_key, &payload_str, signature)
+        {
+            log::warn!(
+                "Send from {} rejected: invalid signature",
+                sender_username
+            );
+            let response_payload =
+                json!({"status": "error", "message": "invalid signature"});
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "sendResponse",
+                sender_username,
+            )
+            .await;
+            return;
+        }
 
         // For MLS messages, extract conversation_id and mls_message
         if let (Some(conversation_id), Some(_mls_message)) = (
@@ -1503,7 +1618,7 @@ impl MessageUtils {
                     let response_payload =
                         json!({"status": "error", "message": "missing recipient field"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "sendResponse",
                         sender_username,
@@ -1526,7 +1641,7 @@ impl MessageUtils {
                     let response_payload =
                         json!({"status": "error", "message": "recipient not found"});
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         response_payload,
                         "sendResponse",
                         sender_username,
@@ -1545,7 +1660,7 @@ impl MessageUtils {
                                 "message": "Message accepted for delivery"
                             });
                             self.send_unified_reply(
-                                sender_tag,
+                                &sender_tag,
                                 response_payload,
                                 "sendResponse",
                                 sender_username,
@@ -1557,7 +1672,7 @@ impl MessageUtils {
                             let response_payload =
                                 json!({"status": "error", "message": "failed to queue message"});
                             self.send_unified_reply(
-                                sender_tag,
+                                &sender_tag,
                                 response_payload,
                                 "sendResponse",
                                 sender_username,
@@ -1570,7 +1685,7 @@ impl MessageUtils {
             let response_payload =
                 json!({"status": "error", "message": "missing conversation_id or mls_message"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "sendResponse",
                 sender_username,
@@ -1582,7 +1697,7 @@ impl MessageUtils {
     async fn handle_fetch_pending_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
     ) {
         log::info!("Handling fetchPending request from {}", sender_username);
@@ -1601,7 +1716,7 @@ impl MessageUtils {
                 log::warn!("fetchPending: user {} not found", sender_username);
                 let response_payload = json!({"status": "error", "message": "user not registered"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "fetchPendingResponse",
                     sender_username,
@@ -1613,7 +1728,7 @@ impl MessageUtils {
                 log::error!("fetchPending: database error: {}", e);
                 let response_payload = json!({"status": "error", "message": "database error"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "fetchPendingResponse",
                     sender_username,
@@ -1635,7 +1750,7 @@ impl MessageUtils {
                 log::warn!("fetchPending: invalid signature from {}", sender_username);
                 let response_payload = json!({"status": "error", "message": "invalid signature"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "fetchPendingResponse",
                     sender_username,
@@ -1647,7 +1762,7 @@ impl MessageUtils {
             log::warn!("fetchPending: missing signature from {}", sender_username);
             let response_payload = json!({"status": "error", "message": "missing signature"});
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 response_payload,
                 "fetchPendingResponse",
                 sender_username,
@@ -1659,7 +1774,7 @@ impl MessageUtils {
         // Fetch pending messages from database
         match self.db.get_pending_messages(sender_username).await {
             Ok(messages) => {
-                let message_ids: Vec<i64> = messages.iter().map(|(id, _, _, _, _)| *id).collect();
+                let message_ids: Vec<String> = messages.iter().map(|(id, _, _, _, _)| id.clone()).collect();
                 let message_list: Vec<Value> = messages
                     .iter()
                     .map(|(id, sender, payload_str, action, created_at)| {
@@ -1689,7 +1804,7 @@ impl MessageUtils {
                     "count": count
                 });
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "fetchPendingResponse",
                     sender_username,
@@ -1707,7 +1822,7 @@ impl MessageUtils {
                 let response_payload =
                     json!({"status": "error", "message": "failed to fetch messages"});
                 self.send_unified_reply(
-                    sender_tag,
+                    &sender_tag,
                     response_payload,
                     "fetchPendingResponse",
                     sender_username,
@@ -1720,7 +1835,7 @@ impl MessageUtils {
     async fn handle_key_package_request_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1746,7 +1861,7 @@ impl MessageUtils {
                         "message": format!("Failed to relay key package request: {}", e)
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         error_payload,
                         "keyPackageResponse",
                         sender_username,
@@ -1761,7 +1876,7 @@ impl MessageUtils {
                 "message": "Missing recipient field"
             });
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 error_payload,
                 "keyPackageResponse",
                 sender_username,
@@ -1773,7 +1888,7 @@ impl MessageUtils {
     async fn handle_key_package_response_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1803,7 +1918,7 @@ impl MessageUtils {
                         "message": format!("Failed to relay key package response: {}", e)
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         error_payload,
                         "keyPackageResponse",
                         sender_username,
@@ -1819,7 +1934,7 @@ impl MessageUtils {
     async fn handle_p2p_welcome_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1845,7 +1960,7 @@ impl MessageUtils {
                         "message": format!("Failed to relay P2P welcome: {}", e)
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         error_payload,
                         "groupJoinResponse",
                         sender_username,
@@ -1860,7 +1975,7 @@ impl MessageUtils {
                 "message": "Missing recipient field"
             });
             self.send_unified_reply(
-                sender_tag,
+                &sender_tag,
                 error_payload,
                 "groupJoinResponse",
                 sender_username,
@@ -1872,7 +1987,7 @@ impl MessageUtils {
     async fn handle_p2p_welcome_ack_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1898,7 +2013,7 @@ impl MessageUtils {
                         "message": format!("Failed to relay P2P welcome ack: {}", e)
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         error_payload,
                         "p2pWelcomeAck",
                         sender_username,
@@ -1914,7 +2029,7 @@ impl MessageUtils {
     async fn handle_group_join_response_unified(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
@@ -1944,7 +2059,7 @@ impl MessageUtils {
                         "message": format!("Failed to relay group join response: {}", e)
                     });
                     self.send_unified_reply(
-                        sender_tag,
+                        &sender_tag,
                         error_payload,
                         "groupJoinResponse",
                         sender_username,
@@ -1960,15 +2075,15 @@ impl MessageUtils {
     /// Handle ACK from client: delete the acknowledged pending messages.
     ///
     /// Clients send ACKs after processing messages (both SURB-delivered and fetchPending).
-    /// No response is sent back — worst case the client re-ACKs and we get a no-op delete.
+    /// Requires PGP signature verification to prevent unauthorized message deletion.
     async fn handle_ack_unified(
         &mut self,
         payload: &Value,
-        _sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
     ) {
-        let pending_ids: Vec<i64> = match payload.get("pendingIds").and_then(|v| v.as_array()) {
-            Some(arr) => arr.iter().filter_map(|v| v.as_i64()).collect(),
+        let pending_ids: Vec<String> = match payload.get("pendingIds").and_then(|v| v.as_array()) {
+            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
             None => {
                 log::warn!("ACK from {} missing pendingIds array", sender_username);
                 return;
@@ -1976,6 +2091,78 @@ impl MessageUtils {
         };
 
         if pending_ids.is_empty() {
+            return;
+        }
+
+        // Verify the sender's PGP signature
+        let signature = match payload.get("signature").and_then(Value::as_str) {
+            Some(sig) => sig,
+            None => {
+                log::warn!("ACK from {} rejected: missing signature", sender_username);
+                let response_payload = json!({"status": "error", "message": "missing signature"});
+                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
+                    .await;
+                return;
+            }
+        };
+
+        let timestamp = match payload.get("timestamp").and_then(Value::as_i64) {
+            Some(ts) => ts,
+            None => {
+                log::warn!("ACK from {} rejected: missing timestamp", sender_username);
+                let response_payload = json!({"status": "error", "message": "missing timestamp"});
+                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
+                    .await;
+                return;
+            }
+        };
+
+        // Validate timestamp freshness (within 300 seconds)
+        let now = chrono::Utc::now().timestamp();
+        if (now - timestamp).unsigned_abs() > 300 {
+            log::warn!(
+                "ACK from {} rejected: stale timestamp (delta={}s)",
+                sender_username,
+                now - timestamp
+            );
+            let response_payload = json!({"status": "error", "message": "stale timestamp"});
+            self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
+                .await;
+            return;
+        }
+
+        // Look up the user's public key
+        let user_data = match self.db.get_user_by_username(sender_username).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                log::warn!("ACK from {} rejected: user not found", sender_username);
+                let response_payload = json!({"status": "error", "message": "user not registered"});
+                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
+                    .await;
+                return;
+            }
+            Err(e) => {
+                log::error!("ACK: database error looking up {}: {}", sender_username, e);
+                return;
+            }
+        };
+
+        let public_key = &user_data.1;
+
+        // Verify signature over "ack:{username}:{timestamp}:{pendingIds_joined}"
+        let ids_joined = pending_ids.join(",");
+        let message_to_verify = format!("ack:{}:{}:{}", sender_username, timestamp, ids_joined);
+        if !self
+            .crypto
+            .verify_signature(public_key, &message_to_verify, signature)
+        {
+            log::warn!(
+                "ACK from {} rejected: invalid signature",
+                sender_username
+            );
+            let response_payload = json!({"status": "error", "message": "invalid signature"});
+            self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
+                .await;
             return;
         }
 
@@ -2009,15 +2196,11 @@ impl MessageUtils {
         }
     }
 
-    async fn get_user_sender_tag(&self, username: &str) -> Option<AnonymousSenderTag> {
+    async fn get_user_sender_tag(&self, username: &str) -> Option<ReplyTag> {
         if let Ok(Some((_username, _public_key, target_sender_tag))) =
             self.db.get_user_by_username(username).await
         {
-            if let Ok(recipient_tag) =
-                AnonymousSenderTag::try_from_base58_string(&target_sender_tag)
-            {
-                return Some(recipient_tag);
-            }
+            return ReplyTag::from_stored_string(&target_sender_tag);
         }
         None
     }
@@ -2025,7 +2208,7 @@ impl MessageUtils {
     /// Send a unified format reply
     async fn send_unified_reply(
         &self,
-        recipient: AnonymousSenderTag,
+        recipient: &ReplyTag,
         payload: Value,
         action: &str,
         recipient_username: &str,
@@ -2044,7 +2227,8 @@ impl MessageUtils {
             "recipient": recipient_username,
             "payload": payload,
             "signature": "server_signature",
-            "timestamp": chrono::Utc::now().to_rfc3339()
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "serverTime": chrono::Utc::now().timestamp()
         });
 
         // Sign the payload
@@ -2065,7 +2249,7 @@ impl MessageUtils {
     /// Send a unified format message (type: "message")
     async fn send_unified_message(
         &self,
-        recipient: AnonymousSenderTag,
+        recipient: &ReplyTag,
         payload: Value,
         action: &str,
         recipient_username: &str,
@@ -2085,7 +2269,8 @@ impl MessageUtils {
             "recipient": recipient_username,
             "payload": payload,
             "signature": "server_signature",
-            "timestamp": chrono::Utc::now().to_rfc3339()
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "serverTime": chrono::Utc::now().timestamp()
         });
 
         // Sign the payload
@@ -2115,7 +2300,7 @@ impl MessageUtils {
         sender: &str,
         payload: &Value,
         action: &str,
-    ) -> Result<i64, String> {
+    ) -> Result<String, String> {
         // 1. Persist to DB first — message is now safe
         let payload_str = serde_json::to_string(payload).unwrap_or_default();
         let pending_id = self
@@ -2141,7 +2326,7 @@ impl MessageUtils {
             }
 
             self.send_unified_message(
-                recipient_tag,
+                &recipient_tag,
                 delivery_payload,
                 action,
                 recipient,
@@ -2165,10 +2350,10 @@ impl MessageUtils {
         Ok(pending_id)
     }
 
-    /// Sign and send a JSON reply over the mixnet using SURBs.
+    /// Sign and send a JSON reply via the configured transport.
     async fn send_encapsulated_reply(
         &self,
-        recipient: AnonymousSenderTag,
+        recipient: &ReplyTag,
         content: String,
         action: &str,
         context: Option<&str>,
@@ -2179,7 +2364,7 @@ impl MessageUtils {
             recipient,
             context
         );
-        let mut payload = json!({"action": action, "content": content});
+        let mut payload = json!({"action": action, "content": content, "serverTime": chrono::Utc::now().timestamp()});
         if let Some(ctx) = context {
             payload["context"] = json!(ctx);
         }

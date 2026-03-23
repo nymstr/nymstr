@@ -3,6 +3,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Result of a unified query - can be either a user or a group
 #[derive(Debug, Clone)]
@@ -62,7 +63,7 @@ impl DbUtils {
             CREATE INDEX IF NOT EXISTS idx_groups_public ON groups(isPublic);
 
             CREATE TABLE IF NOT EXISTS pending_messages (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                id           TEXT PRIMARY KEY,
                 recipient    TEXT NOT NULL,
                 sender       TEXT NOT NULL,
                 payload      TEXT NOT NULL,
@@ -261,31 +262,33 @@ impl DbUtils {
 
     // ===== PENDING MESSAGE OPERATIONS =====
 
-    /// Queue a message for an offline user. Returns the message ID.
+    /// Queue a message for an offline user. Returns the message ID (UUID).
     pub async fn queue_pending_message(
         &self,
         recipient: &str,
         sender: &str,
         payload: &str,
         action: &str,
-    ) -> Result<i64> {
-        let res = sqlx::query(
-            "INSERT INTO pending_messages (recipient, sender, payload, action) VALUES (?, ?, ?, ?)",
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO pending_messages (id, recipient, sender, payload, action) VALUES (?, ?, ?, ?, ?)",
         )
+        .bind(&id)
         .bind(recipient)
         .bind(sender)
         .bind(payload)
         .bind(action)
         .execute(&self.pool)
         .await?;
-        Ok(res.last_insert_rowid())
+        Ok(id)
     }
 
     /// Get all pending messages for a user. Returns Vec<(id, sender, payload, action, createdAt)>.
     pub async fn get_pending_messages(
         &self,
         recipient: &str,
-    ) -> Result<Vec<(i64, String, String, String, i64)>> {
+    ) -> Result<Vec<(String, String, String, String, i64)>> {
         let rows = sqlx::query(
             "SELECT id, sender, payload, action, createdAt FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch() ORDER BY createdAt ASC"
         )
@@ -299,7 +302,7 @@ impl DbUtils {
     }
 
     /// Delete pending messages by IDs after successful delivery.
-    pub async fn delete_pending_messages(&self, ids: &[i64]) -> Result<u64> {
+    pub async fn delete_pending_messages(&self, ids: &[String]) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
         }
@@ -321,7 +324,7 @@ impl DbUtils {
     pub async fn delete_pending_messages_for_recipient(
         &self,
         recipient: &str,
-        ids: &[i64],
+        ids: &[String],
     ) -> Result<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -522,7 +525,7 @@ mod tests {
 
         // Alice tries to delete charlie's message — should not work
         let deleted = db
-            .delete_pending_messages_for_recipient("alice", &[id_charlie])
+            .delete_pending_messages_for_recipient("alice", &[id_charlie.clone()])
             .await
             .unwrap();
         assert_eq!(deleted, 0, "alice must not delete charlie's messages");
