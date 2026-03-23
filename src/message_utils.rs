@@ -1,10 +1,9 @@
 use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::DbUtils;
 use crate::rate_limiter::RateLimiter;
+use crate::transport::{ReplyTag, ReplySender};
 use chrono::Utc;
-use nym_sdk::mixnet::{
-    AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage,
-};
+use nym_sdk::mixnet::ReconstructedMessage;
 use serde_json::{json, Value};
 
 // ============================================================
@@ -24,6 +23,8 @@ struct RegisterRequest {
 /// Common representation for approve group requests
 struct ApproveGroupRequest {
     username: String,
+    group_id: String,
+    timestamp: i64,
     signature: String,
 }
 
@@ -121,10 +122,14 @@ impl ApproveGroupRequest {
     /// Parse from legacy format
     fn from_legacy(data: &Value) -> Option<Self> {
         let username = data.get("username").and_then(Value::as_str)?.to_string();
+        let group_id = data.get("groupId").and_then(Value::as_str)?.to_string();
+        let timestamp = data.get("timestamp").and_then(Value::as_i64)?;
         let signature = data.get("signature").and_then(Value::as_str)?.to_string();
 
         Some(Self {
             username,
+            group_id,
+            timestamp,
             signature,
         })
     }
@@ -132,9 +137,13 @@ impl ApproveGroupRequest {
     /// Parse from unified format
     fn from_unified(payload: &Value, signature: &str) -> Option<Self> {
         let username = payload.get("username").and_then(Value::as_str)?.to_string();
+        let group_id = payload.get("groupId").and_then(Value::as_str)?.to_string();
+        let timestamp = payload.get("timestamp").and_then(Value::as_i64)?;
 
         Some(Self {
             username,
+            group_id,
+            timestamp,
             signature: signature.to_string(),
         })
     }
@@ -212,11 +221,14 @@ impl FetchGroupRequest {
 pub struct MessageUtils {
     db: DbUtils,
     crypto: CryptoUtils,
-    sender: MixnetClientSender,
+    sender: Box<dyn ReplySender>,
     client_id: String,
     admin_public_key: Option<String>,
+    group_id: String,
     /// Rate limiter for registration endpoint
     rate_limiter: RateLimiter,
+    /// Rate limiter for general endpoints
+    rate_limiter_general: RateLimiter,
 }
 
 impl MessageUtils {
@@ -225,6 +237,21 @@ impl MessageUtils {
 
     /// Rate limit window in seconds (1 minute)
     const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+    /// Maximum requests per sender for general endpoints within the rate limit window
+    const RATE_LIMIT_GENERAL_MAX_ATTEMPTS: usize = 60;
+
+    /// General rate limit window in seconds (1 minute)
+    const RATE_LIMIT_GENERAL_WINDOW_SECS: u64 = 60;
+
+    /// Maximum base64-encoded size for welcome messages (~128KB decoded)
+    const MAX_WELCOME_B64_LEN: usize = 174_763;
+
+    /// Maximum decoded welcome message size (128KB)
+    const MAX_WELCOME_DECODED_SIZE: usize = 131_072;
+
+    /// Maximum number of pending welcomes per user
+    const MAX_WELCOMES_PER_USER: i64 = 20;
 
     /// Check if a username is valid: non-empty, max 64 chars, alphanumeric + '-' or '_'.
     fn is_valid_username(username: &str) -> bool {
@@ -247,10 +274,11 @@ impl MessageUtils {
     /// Create a new MessageUtils instance.
     pub fn new(
         client_id: String,
-        sender: MixnetClientSender,
+        sender: Box<dyn ReplySender>,
         db: DbUtils,
         crypto: CryptoUtils,
         admin_public_key: Option<String>,
+        group_id: String,
     ) -> Self {
         MessageUtils {
             db,
@@ -258,27 +286,43 @@ impl MessageUtils {
             sender,
             client_id,
             admin_public_key,
+            group_id,
             rate_limiter: RateLimiter::new(
                 Self::RATE_LIMIT_MAX_ATTEMPTS,
                 Self::RATE_LIMIT_WINDOW_SECS,
             ),
+            rate_limiter_general: RateLimiter::new(
+                Self::RATE_LIMIT_GENERAL_MAX_ATTEMPTS,
+                Self::RATE_LIMIT_GENERAL_WINDOW_SECS,
+            ),
         }
     }
 
-    /// Process an incoming mixnet message.
-    /// Supports both unified format (with "type" field) and legacy format.
+    /// Process an incoming Nym mixnet message (convenience wrapper).
     pub async fn process_received_message(&mut self, msg: ReconstructedMessage) {
+        let tag = msg.sender_tag.map(ReplyTag::from);
+        self.process_message(tag, msg.message).await;
+    }
+
+    /// Process an incoming message from any transport.
+    pub async fn process_message(&mut self, sender_tag: Option<ReplyTag>, raw_bytes: Vec<u8>) {
         // Clean up rate limiter entries with no recent attempts
         self.rate_limiter.cleanup();
+        self.rate_limiter_general.cleanup();
 
-        let sender_tag = if let Some(tag) = msg.sender_tag {
+        // Clean up old message dedup hashes (10 minute max age)
+        if let Err(e) = self.db.cleanup_old_message_hashes(600).await {
+            log::warn!("Failed to cleanup old message hashes: {}", e);
+        }
+
+        let sender_tag = if let Some(tag) = sender_tag {
             tag
         } else {
             log::warn!("Received message without sender tag, ignoring");
             return;
         };
 
-        let raw = match String::from_utf8(msg.message) {
+        let raw = match String::from_utf8(raw_bytes) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Invalid UTF-8 in message: {}", e);
@@ -320,7 +364,7 @@ impl MessageUtils {
                             self.handle_register_core(req, sender_tag).await;
                         } else {
                             self.send_encapsulated_reply(
-                                sender_tag,
+                                &sender_tag,
                                 "error: missing required fields".into(),
                                 "registerResponse",
                                 None,
@@ -333,7 +377,7 @@ impl MessageUtils {
                             self.handle_approve_group_core(req, sender_tag).await;
                         } else {
                             self.send_encapsulated_reply(
-                                sender_tag,
+                                &sender_tag,
                                 "error: missing required fields".into(),
                                 "approveGroupResponse",
                                 None,
@@ -348,7 +392,7 @@ impl MessageUtils {
                             self.handle_send_group_core(req, sender_tag).await;
                         } else {
                             self.send_encapsulated_reply(
-                                sender_tag,
+                                &sender_tag,
                                 "error: missing ciphertext".into(),
                                 "sendGroupResponse",
                                 None,
@@ -363,7 +407,7 @@ impl MessageUtils {
                             self.handle_fetch_group_core(req, sender_tag).await;
                         } else {
                             self.send_encapsulated_reply(
-                                sender_tag,
+                                &sender_tag,
                                 "error: missing credentials".into(),
                                 "fetchGroupResponse",
                                 None,
@@ -413,14 +457,14 @@ impl MessageUtils {
     async fn authenticate_request_core(
         &self,
         auth: &AuthRequest,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: &ReplyTag,
         action_response: &str,
         signed_content: &str,
     ) -> Option<String> {
         // Validate username format (non-empty, max 64 chars, alphanumeric/-/_)
         if !Self::is_valid_username(&auth.username) || auth.username == "unknown" {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing or invalid username".into(),
                 action_response,
                 None,
@@ -432,7 +476,7 @@ impl MessageUtils {
         // Validate signature
         if auth.signature.is_empty() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing or invalid signature".into(),
                 action_response,
                 None,
@@ -446,7 +490,7 @@ impl MessageUtils {
             Ok(Some((_u, pk))) => pk,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: user not registered".into(),
                     action_response,
                     None,
@@ -462,7 +506,7 @@ impl MessageUtils {
             .verify_pgp_signature(&public_key, signed_content, &auth.signature)
         {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: bad signature".into(),
                 action_response,
                 None,
@@ -474,13 +518,72 @@ impl MessageUtils {
         Some(auth.username.clone())
     }
 
+    /// Check if a user is a member of this group.
+    /// Returns true if authorized, false (and sends error reply) if not.
+    async fn authorize_member(
+        &self,
+        username: &str,
+        sender_tag: &ReplyTag,
+        response_action: &str,
+    ) -> bool {
+        match self.db.is_group_member(&self.group_id, username).await {
+            Ok(true) => true,
+            Ok(false) => {
+                log::warn!("Authorization failed: {} is not a group member", username);
+                self.send_encapsulated_reply(
+                    &sender_tag,
+                    json!({"status": "error", "message": "not a group member"}).to_string(),
+                    response_action,
+                    None,
+                )
+                .await;
+                false
+            }
+            Err(e) => {
+                log::error!("Authorization check failed: {}", e);
+                self.send_encapsulated_reply(
+                    &sender_tag,
+                    json!({"status": "error", "message": "authorization check failed"}).to_string(),
+                    response_action,
+                    None,
+                )
+                .await;
+                false
+            }
+        }
+    }
+
+    /// Check general rate limit for a sender_tag. Returns false and sends error reply if rate limited.
+    async fn check_general_rate_limit(
+        &mut self,
+        sender_tag: &ReplyTag,
+        response_action: &str,
+    ) -> bool {
+        let rate_key = sender_tag.to_string();
+        if !self.rate_limiter_general.check_and_record(&rate_key) {
+            log::warn!(
+                "General rate limit exceeded for sender_tag={:?}",
+                sender_tag
+            );
+            self.send_encapsulated_reply(
+                &sender_tag,
+                "error: rate limit exceeded, please try again later".into(),
+                response_action,
+                None,
+            )
+            .await;
+            return false;
+        }
+        true
+    }
+
     /// Handle a client 'register' (legacy format entry point).
-    async fn handle_register(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_register(&mut self, data: &Value, sender_tag: ReplyTag) {
         let req = match RegisterRequest::from_legacy(data) {
             Some(r) => r,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing required fields".into(),
                     "registerResponse",
                     None,
@@ -493,7 +596,7 @@ impl MessageUtils {
     }
 
     /// Core implementation for register - handles both legacy and unified formats.
-    async fn handle_register_core(&mut self, req: RegisterRequest, sender_tag: AnonymousSenderTag) {
+    async fn handle_register_core(&mut self, req: RegisterRequest, sender_tag: ReplyTag) {
         // Rate limit check for registration attempts
         let rate_key = sender_tag.to_string();
         if !self.rate_limiter.check_and_record(&rate_key) {
@@ -502,7 +605,26 @@ impl MessageUtils {
                 sender_tag
             );
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
+                "error: rate limit exceeded, please try again later".into(),
+                "registerResponse",
+                None,
+            )
+            .await;
+            return;
+        }
+
+        // Secondary rate limit check by username
+        if !self
+            .rate_limiter
+            .check_and_record(&format!("user:{}", req.username))
+        {
+            log::warn!(
+                "Rate limit exceeded for registration username={}",
+                req.username
+            );
+            self.send_encapsulated_reply(
+                &sender_tag,
                 "error: rate limit exceeded, please try again later".into(),
                 "registerResponse",
                 None,
@@ -515,7 +637,7 @@ impl MessageUtils {
         if !Self::is_valid_username(&req.username) {
             log::warn!("Invalid username format in registration: {}", req.username);
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: invalid username format".into(),
                 "registerResponse",
                 None,
@@ -530,7 +652,7 @@ impl MessageUtils {
         if time_diff > 300 {
             log::warn!("Registration timestamp too old/new: diff={}s", time_diff);
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: timestamp expired".into(),
                 "registerResponse",
                 None,
@@ -542,7 +664,7 @@ impl MessageUtils {
         // Validate signature is present
         if req.signature.is_empty() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing signature".into(),
                 "registerResponse",
                 None,
@@ -562,7 +684,7 @@ impl MessageUtils {
         {
             log::warn!("Bad signature for registration: {}", req.username);
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: bad signature".into(),
                 "registerResponse",
                 None,
@@ -592,9 +714,25 @@ impl MessageUtils {
                             );
                         }
                     }
+                    // Ensure group row exists and add admin as group member
+                    if let Err(e) = self
+                        .db
+                        .create_group(&self.group_id, &self.group_id, &req.username, true, true)
+                        .await
+                    {
+                        log::warn!("Failed to create group entry (may already exist): {}", e);
+                    }
+                    if let Err(e) = self
+                        .db
+                        .add_group_member(&self.group_id, &req.username)
+                        .await
+                    {
+                        log::warn!("Failed to add group member entry: {}", e);
+                    }
+
                     log::info!("Admin {} auto-approved and registered", req.username);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "approved".into(),
                         "registerResponse",
                         None,
@@ -603,7 +741,7 @@ impl MessageUtils {
                 }
                 Ok(false) => {
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: user already registered".into(),
                         "registerResponse",
                         None,
@@ -613,7 +751,7 @@ impl MessageUtils {
                 Err(e) => {
                     log::error!("DB error during admin register: {}", e);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: registration failed".into(),
                         "registerResponse",
                         None,
@@ -637,7 +775,7 @@ impl MessageUtils {
                     }
                     log::info!("Registration pending for user: {}", req.username);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "pending".into(),
                         "registerResponse",
                         None,
@@ -646,7 +784,7 @@ impl MessageUtils {
                 }
                 Ok(false) => {
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: user already registered".into(),
                         "registerResponse",
                         None,
@@ -656,7 +794,7 @@ impl MessageUtils {
                 Err(e) => {
                     log::error!("DB error during register: {}", e);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: registration failed".into(),
                         "registerResponse",
                         None,
@@ -668,12 +806,12 @@ impl MessageUtils {
     }
 
     /// Handle a client 'approveGroup' (legacy format entry point).
-    async fn handle_approve_group(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_approve_group(&mut self, data: &Value, sender_tag: ReplyTag) {
         let req = match ApproveGroupRequest::from_legacy(data) {
             Some(r) => r,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: unauthorized or bad signature".into(),
                     "approveGroupResponse",
                     None,
@@ -689,12 +827,20 @@ impl MessageUtils {
     async fn handle_approve_group_core(
         &mut self,
         req: ApproveGroupRequest,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "approveGroupResponse")
+            .await
+        {
+            return;
+        }
+
         // Validate signature is present
         if req.signature.is_empty() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing signature".into(),
                 "approveGroupResponse",
                 None,
@@ -707,7 +853,7 @@ impl MessageUtils {
             Some(key) => key,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: no admin configured".into(),
                     "approveGroupResponse",
                     None,
@@ -717,12 +863,42 @@ impl MessageUtils {
             }
         };
 
+        // Validate group_id matches this server
+        if req.group_id != self.group_id {
+            self.send_encapsulated_reply(
+                &sender_tag,
+                "error: group_id mismatch".into(),
+                "approveGroupResponse",
+                None,
+            )
+            .await;
+            return;
+        }
+
+        // Check timestamp freshness (±300 seconds)
+        let now = chrono::Utc::now().timestamp();
+        if (now - req.timestamp).abs() > 300 {
+            self.send_encapsulated_reply(
+                &sender_tag,
+                "error: timestamp expired".into(),
+                "approveGroupResponse",
+                None,
+            )
+            .await;
+            return;
+        }
+
+        // Verify signature over structured content (prevents replay)
+        let signed_content = format!(
+            "approveGroup:{}:{}:{}",
+            req.username, req.group_id, req.timestamp
+        );
         if !self
             .crypto
-            .verify_pgp_signature(admin_key, &req.username, &req.signature)
+            .verify_pgp_signature(admin_key, &signed_content, &req.signature)
         {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: unauthorized or bad signature".into(),
                 "approveGroupResponse",
                 None,
@@ -736,7 +912,7 @@ impl MessageUtils {
             Ok(Some(pk)) => pk,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: user not in pending list".into(),
                     "approveGroupResponse",
                     None,
@@ -754,6 +930,14 @@ impl MessageUtils {
             Ok(true) => {
                 if let Err(e) = self.db.remove_pending_user(&req.username).await {
                     log::warn!("Failed to remove pending user {}: {}", req.username, e);
+                }
+                // Add as group member
+                if let Err(e) = self
+                    .db
+                    .add_group_member(&self.group_id, &req.username)
+                    .await
+                {
+                    log::warn!("Failed to add group member entry: {}", e);
                 }
 
                 // Build response with KeyPackage if available
@@ -773,12 +957,12 @@ impl MessageUtils {
                     .to_string()
                 };
 
-                self.send_encapsulated_reply(sender_tag, response, "approveGroupResponse", None)
+                self.send_encapsulated_reply(&sender_tag, response, "approveGroupResponse", None)
                     .await;
             }
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: approve failed".into(),
                     "approveGroupResponse",
                     None,
@@ -789,12 +973,12 @@ impl MessageUtils {
     }
 
     /// Handle a client 'sendGroup' (legacy format entry point).
-    async fn handle_send_group(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_send_group(&mut self, data: &Value, sender_tag: ReplyTag) {
         let req = match SendGroupRequest::from_legacy(data) {
             Some(r) => r,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing ciphertext or credentials".into(),
                     "sendGroupResponse",
                     None,
@@ -810,12 +994,20 @@ impl MessageUtils {
     async fn handle_send_group_core(
         &mut self,
         req: SendGroupRequest,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "sendGroupResponse")
+            .await
+        {
+            return;
+        }
+
         // Validate ciphertext is present
         if req.ciphertext.is_empty() {
             self.send_encapsulated_reply(
-                sender_tag,
+                &sender_tag,
                 "error: missing ciphertext".into(),
                 "sendGroupResponse",
                 None,
@@ -830,12 +1022,51 @@ impl MessageUtils {
             signature: req.signature.clone(),
         };
         let username = match self
-            .authenticate_request_core(&auth, sender_tag, "sendGroupResponse", &req.ciphertext)
+            .authenticate_request_core(&auth, &sender_tag, "sendGroupResponse", &req.ciphertext)
             .await
         {
             Some(u) => u,
             None => return,
         };
+
+        // Authorize: check group membership
+        if !self
+            .authorize_member(&username, &sender_tag, "sendGroupResponse")
+            .await
+        {
+            return;
+        }
+
+        // Dedup check: compute SHA-256 of "{sender}:{ciphertext}" and reject duplicates
+        let dedup_input = format!("{}:{}", username, req.ciphertext);
+        let hash_hex = match openssl::hash::hash(openssl::hash::MessageDigest::sha256(), dedup_input.as_bytes()) {
+            Ok(bytes) => hex::encode(&bytes),
+            Err(e) => {
+                log::error!("Failed to compute message hash: {}", e);
+                // Fall through without dedup on hash error
+                String::new()
+            }
+        };
+        if !hash_hex.is_empty() {
+            match self.db.check_and_store_message_hash(&hash_hex).await {
+                Ok(true) => { /* new message, proceed */ }
+                Ok(false) => {
+                    log::warn!("Duplicate sendGroup message detected from {}", username);
+                    self.send_encapsulated_reply(
+                        &sender_tag,
+                        json!({"status": "error", "message": "duplicate message"}).to_string(),
+                        "sendGroupResponse",
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    log::error!("Failed to check message hash: {}", e);
+                    // On error, allow the message through rather than blocking
+                }
+            }
+        }
 
         // Store message in SQLite
         match self.db.store_message(&username, &req.ciphertext).await {
@@ -845,13 +1076,13 @@ impl MessageUtils {
                     "messageId": msg_id
                 })
                 .to_string();
-                self.send_encapsulated_reply(sender_tag, content, "sendGroupResponse", None)
+                self.send_encapsulated_reply(&sender_tag, content, "sendGroupResponse", None)
                     .await;
             }
             Err(e) => {
                 log::error!("Failed to store message: {}", e);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: failed to store message".into(),
                     "sendGroupResponse",
                     None,
@@ -862,12 +1093,12 @@ impl MessageUtils {
     }
 
     /// Handle a client 'fetchGroup' (legacy format entry point).
-    async fn handle_fetch_group(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
+    async fn handle_fetch_group(&mut self, data: &Value, sender_tag: ReplyTag) {
         let req = match FetchGroupRequest::from_legacy(data) {
             Some(r) => r,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing credentials".into(),
                     "fetchGroupResponse",
                     None,
@@ -883,18 +1114,34 @@ impl MessageUtils {
     async fn handle_fetch_group_core(
         &mut self,
         req: FetchGroupRequest,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "fetchGroupResponse")
+            .await
+        {
+            return;
+        }
+
         // Authenticate: signature should be over the lastSeenId
         let signed_content = req.last_seen_id.to_string();
         let auth = AuthRequest {
             username: req.username.clone(),
             signature: req.signature.clone(),
         };
-        if self
-            .authenticate_request_core(&auth, sender_tag, "fetchGroupResponse", &signed_content)
+        let username = match self
+            .authenticate_request_core(&auth, &sender_tag, "fetchGroupResponse", &signed_content)
             .await
-            .is_none()
+        {
+            Some(u) => u,
+            None => return,
+        };
+
+        // Authorize: check group membership
+        if !self
+            .authorize_member(&username, &sender_tag, "fetchGroupResponse")
+            .await
         {
             return;
         }
@@ -915,13 +1162,13 @@ impl MessageUtils {
                     .collect();
 
                 let content = json!({ "messages": formatted }).to_string();
-                self.send_encapsulated_reply(sender_tag, content, "fetchGroupResponse", None)
+                self.send_encapsulated_reply(&sender_tag, content, "fetchGroupResponse", None)
                     .await;
             }
             Err(e) => {
                 log::error!("Failed to fetch messages: {}", e);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: failed to fetch messages".into(),
                     "fetchGroupResponse",
                     None,
@@ -931,10 +1178,10 @@ impl MessageUtils {
         }
     }
 
-    /// Sign and send a JSON reply over the mixnet using SURBs (unified format).
+    /// Sign and send a JSON reply via the configured transport.
     async fn send_encapsulated_reply(
         &self,
-        recipient: AnonymousSenderTag,
+        recipient: &ReplyTag,
         content: String,
         action: &str,
         context: Option<&str>,
@@ -963,7 +1210,8 @@ impl MessageUtils {
             "recipient": "client",
             "payload": payload_obj,
             "signature": signature,
-            "timestamp": Utc::now().to_rfc3339()
+            "timestamp": Utc::now().to_rfc3339(),
+            "serverTime": Utc::now().timestamp()
         });
 
         let msg = message.to_string();
@@ -982,16 +1230,24 @@ impl MessageUtils {
     async fn handle_store_welcome(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         signature: &str,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "storeWelcomeResponse")
+            .await
+        {
+            return;
+        }
+
         // Extract and validate group_id
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
             Some(g) if Self::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing or invalid groupId".into(),
                     "storeWelcomeResponse",
                     None,
@@ -1006,7 +1262,7 @@ impl MessageUtils {
             Some(u) if Self::is_valid_username(u) => u,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing or invalid targetUsername".into(),
                     "storeWelcomeResponse",
                     None,
@@ -1020,7 +1276,7 @@ impl MessageUtils {
             Some(w) if !w.is_empty() => w,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing welcome".into(),
                     "storeWelcomeResponse",
                     None,
@@ -1030,13 +1286,25 @@ impl MessageUtils {
             }
         };
 
+        // Validate welcome size (base64 encoded)
+        if welcome_b64.len() > Self::MAX_WELCOME_B64_LEN {
+            self.send_encapsulated_reply(
+                &sender_tag,
+                "error: welcome message too large".into(),
+                "storeWelcomeResponse",
+                None,
+            )
+            .await;
+            return;
+        }
+
         // Decode the welcome from base64
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let welcome_bytes = match STANDARD.decode(welcome_b64) {
             Ok(bytes) => bytes,
             Err(_) => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: invalid base64 welcome".into(),
                     "storeWelcomeResponse",
                     None,
@@ -1046,6 +1314,18 @@ impl MessageUtils {
             }
         };
 
+        // Validate decoded size
+        if welcome_bytes.len() > Self::MAX_WELCOME_DECODED_SIZE {
+            self.send_encapsulated_reply(
+                &sender_tag,
+                "error: welcome message too large".into(),
+                "storeWelcomeResponse",
+                None,
+            )
+            .await;
+            return;
+        }
+
         // Authenticate the request (signature over groupId:targetUsername)
         let signed_content = format!("{}:{}", group_id, target_username);
         let auth = AuthRequest {
@@ -1053,11 +1333,77 @@ impl MessageUtils {
             signature: signature.to_string(),
         };
         if self
-            .authenticate_request_core(&auth, sender_tag, "storeWelcomeResponse", &signed_content)
+            .authenticate_request_core(&auth, &sender_tag, "storeWelcomeResponse", &signed_content)
             .await
             .is_none()
         {
             return;
+        }
+
+        // Admin-only: verify sender's public key matches admin key
+        if let Some(admin_key) = &self.admin_public_key {
+            let sender_key = match self.db.get_user_by_username(sender_username).await {
+                Ok(Some((_u, pk))) => pk,
+                _ => {
+                    self.send_encapsulated_reply(
+                        &sender_tag,
+                        "error: sender not found".into(),
+                        "storeWelcomeResponse",
+                        None,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if sender_key.trim() != admin_key.trim() {
+                log::warn!(
+                    "Non-admin user {} attempted to store welcome",
+                    sender_username
+                );
+                self.send_encapsulated_reply(
+                    &sender_tag,
+                    "error: only admin can store welcome messages".into(),
+                    "storeWelcomeResponse",
+                    None,
+                )
+                .await;
+                return;
+            }
+        }
+
+        // Check per-user welcome quota
+        match self
+            .db
+            .count_pending_welcomes_for_user(target_username)
+            .await
+        {
+            Ok(count) if count >= Self::MAX_WELCOMES_PER_USER => {
+                log::warn!(
+                    "Welcome quota exceeded for user {} ({} pending)",
+                    target_username,
+                    count
+                );
+                self.send_encapsulated_reply(
+                    &sender_tag,
+                    "error: too many pending welcomes for this user".into(),
+                    "storeWelcomeResponse",
+                    None,
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                log::error!("Failed to check welcome quota: {}", e);
+                self.send_encapsulated_reply(
+                    &sender_tag,
+                    "error: internal error".into(),
+                    "storeWelcomeResponse",
+                    None,
+                )
+                .await;
+                return;
+            }
+            _ => {} // Under quota, proceed
         }
 
         // Store the welcome
@@ -1073,7 +1419,7 @@ impl MessageUtils {
                     group_id
                 );
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     json!({"status": "success"}).to_string(),
                     "storeWelcomeResponse",
                     None,
@@ -1082,7 +1428,7 @@ impl MessageUtils {
             }
             Ok(false) | Err(_) => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: failed to store welcome".into(),
                     "storeWelcomeResponse",
                     None,
@@ -1096,10 +1442,18 @@ impl MessageUtils {
     async fn handle_fetch_welcome(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         signature: &str,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "fetchWelcomeResponse")
+            .await
+        {
+            return;
+        }
+
         // Optional: filter by group_id
         let group_id = payload.get("groupId").and_then(Value::as_str);
 
@@ -1110,7 +1464,7 @@ impl MessageUtils {
             signature: signature.to_string(),
         };
         if self
-            .authenticate_request_core(&auth, sender_tag, "fetchWelcomeResponse", &signed_content)
+            .authenticate_request_core(&auth, &sender_tag, "fetchWelcomeResponse", &signed_content)
             .await
             .is_none()
         {
@@ -1142,7 +1496,7 @@ impl MessageUtils {
                     }
 
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         response,
                         "fetchWelcomeResponse",
                         None,
@@ -1151,7 +1505,7 @@ impl MessageUtils {
                 }
                 Ok(None) => {
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         json!({"welcomes": []}).to_string(),
                         "fetchWelcomeResponse",
                         None,
@@ -1161,7 +1515,7 @@ impl MessageUtils {
                 Err(e) => {
                     log::error!("Failed to fetch welcome: {}", e);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: failed to fetch welcome".into(),
                         "fetchWelcomeResponse",
                         None,
@@ -1198,7 +1552,7 @@ impl MessageUtils {
 
                     let response = json!({"welcomes": formatted}).to_string();
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         response,
                         "fetchWelcomeResponse",
                         None,
@@ -1208,7 +1562,7 @@ impl MessageUtils {
                 Err(e) => {
                     log::error!("Failed to fetch welcomes: {}", e);
                     self.send_encapsulated_reply(
-                        sender_tag,
+                        &sender_tag,
                         "error: failed to fetch welcomes".into(),
                         "fetchWelcomeResponse",
                         None,
@@ -1219,19 +1573,31 @@ impl MessageUtils {
         }
     }
 
-    /// Handle 'syncEpoch': User requests commits since their last known epoch.
+    /// Handle 'syncEpoch': User requests buffered commits since a cursor.
+    /// Per RFC 9420, the server (Delivery Service) is a dumb message store.
+    /// It uses the autoincrement `id` from `buffered_commits` as a sequential
+    /// cursor instead of tracking MLS epochs. The `sinceEpoch` parameter is
+    /// kept for backward compatibility but treated as a sequence cursor (sinceId).
     async fn handle_sync_epoch(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         signature: &str,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "syncEpochResponse")
+            .await
+        {
+            return;
+        }
+
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
             Some(g) if Self::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing or invalid groupId".into(),
                     "syncEpochResponse",
                     None,
@@ -1241,33 +1607,44 @@ impl MessageUtils {
             }
         };
 
-        let since_epoch = payload
-            .get("sinceEpoch")
+        // Accept both sinceId (new) and sinceEpoch (backward compat) as the cursor
+        let since_id = payload
+            .get("sinceId")
             .and_then(Value::as_i64)
+            .or_else(|| payload.get("sinceEpoch").and_then(Value::as_i64))
             .unwrap_or(0);
 
-        // Authenticate (signature over groupId:sinceEpoch)
-        let signed_content = format!("{}:{}", group_id, since_epoch);
+        // Authenticate (signature over groupId:sinceId)
+        let signed_content = format!("{}:{}", group_id, since_id);
         let auth = AuthRequest {
             username: sender_username.to_string(),
             signature: signature.to_string(),
         };
-        if self
-            .authenticate_request_core(&auth, sender_tag, "syncEpochResponse", &signed_content)
+        let username = match self
+            .authenticate_request_core(&auth, &sender_tag, "syncEpochResponse", &signed_content)
             .await
-            .is_none()
+        {
+            Some(u) => u,
+            None => return,
+        };
+
+        // Authorize: check group membership
+        if !self
+            .authorize_member(&username, &sender_tag, "syncEpochResponse")
+            .await
         {
             return;
         }
 
-        // Get commits since the given epoch
-        match self.db.get_commits_since_epoch(group_id, since_epoch).await {
+        // Get commits since the given cursor (sequential id)
+        match self.db.get_commits_since_id(group_id, since_id).await {
             Ok(commits) => {
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
                 let formatted: Vec<Value> = commits
                     .into_iter()
-                    .map(|(epoch, commit_bytes, sender)| {
+                    .map(|(id, epoch, commit_bytes, sender)| {
                         json!({
+                            "id": id,
                             "epoch": epoch,
                             "commit": STANDARD.encode(&commit_bytes),
                             "sender": sender
@@ -1275,36 +1652,20 @@ impl MessageUtils {
                     })
                     .collect();
 
-                // Get current epoch
-                let current_epoch = self.db.get_group_epoch(group_id).await.unwrap_or(0);
-
                 let response = json!({
-                    "currentEpoch": current_epoch,
+                    "groupId": group_id,
+                    "currentEpoch": 0,
                     "commits": formatted
                 })
                 .to_string();
 
-                // Update the member's tracked epoch
-                if let Err(e) = self
-                    .db
-                    .update_member_epoch(group_id, sender_username, current_epoch)
-                    .await
-                {
-                    log::warn!(
-                        "Failed to update member epoch for {} in group {}: {}",
-                        sender_username,
-                        group_id,
-                        e
-                    );
-                }
-
-                self.send_encapsulated_reply(sender_tag, response, "syncEpochResponse", None)
+                self.send_encapsulated_reply(&sender_tag, response, "syncEpochResponse", None)
                     .await;
             }
             Err(e) => {
                 log::error!("Failed to sync epoch: {}", e);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: failed to sync epoch".into(),
                     "syncEpochResponse",
                     None,
@@ -1319,15 +1680,23 @@ impl MessageUtils {
     async fn handle_buffer_commit(
         &mut self,
         payload: &Value,
-        sender_tag: AnonymousSenderTag,
+        sender_tag: ReplyTag,
         sender_username: &str,
         signature: &str,
     ) {
+        // Rate limit
+        if !self
+            .check_general_rate_limit(&sender_tag, "bufferCommitResponse")
+            .await
+        {
+            return;
+        }
+
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
             Some(g) if Self::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing or invalid groupId".into(),
                     "bufferCommitResponse",
                     None,
@@ -1341,7 +1710,7 @@ impl MessageUtils {
             Some(e) => e,
             None => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing epoch".into(),
                     "bufferCommitResponse",
                     None,
@@ -1355,7 +1724,7 @@ impl MessageUtils {
             Some(c) if !c.is_empty() => c,
             _ => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: missing commit".into(),
                     "bufferCommitResponse",
                     None,
@@ -1371,7 +1740,7 @@ impl MessageUtils {
             Ok(bytes) => bytes,
             Err(_) => {
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: invalid base64 commit".into(),
                     "bufferCommitResponse",
                     None,
@@ -1387,30 +1756,31 @@ impl MessageUtils {
             username: sender_username.to_string(),
             signature: signature.to_string(),
         };
-        if self
-            .authenticate_request_core(&auth, sender_tag, "bufferCommitResponse", &signed_content)
+        let username = match self
+            .authenticate_request_core(&auth, &sender_tag, "bufferCommitResponse", &signed_content)
             .await
-            .is_none()
+        {
+            Some(u) => u,
+            None => return,
+        };
+
+        // Authorize: check group membership
+        if !self
+            .authorize_member(&username, &sender_tag, "bufferCommitResponse")
+            .await
         {
             return;
         }
 
-        // Buffer the commit
+        // Buffer the commit (server is a dumb message store per RFC 9420 —
+        // it does NOT track epochs, only stores and delivers commits)
         match self
             .db
             .buffer_commit(group_id, epoch, &commit_bytes, sender_username)
             .await
         {
             Ok(_) => {
-                // Update group epoch if this is newer
-                let current = self.db.get_group_epoch(group_id).await.unwrap_or(0);
-                if epoch > current {
-                    if let Err(e) = self.db.update_group_epoch(group_id, epoch).await {
-                        log::warn!("Failed to update group epoch for {}: {}", group_id, e);
-                    }
-                }
-
-                // Clean up old commits (keep last 100 epochs)
+                // Clean up old commits (keep last 100 by count)
                 if let Err(e) = self.db.cleanup_old_commits(group_id, 100).await {
                     log::warn!(
                         "Failed to cleanup old commits for group {}: {}",
@@ -1421,7 +1791,7 @@ impl MessageUtils {
 
                 log::info!("Buffered commit for group {} at epoch {}", group_id, epoch);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     json!({"status": "success", "epoch": epoch}).to_string(),
                     "bufferCommitResponse",
                     None,
@@ -1431,7 +1801,7 @@ impl MessageUtils {
             Err(e) => {
                 log::error!("Failed to buffer commit: {}", e);
                 self.send_encapsulated_reply(
-                    sender_tag,
+                    &sender_tag,
                     "error: failed to buffer commit".into(),
                     "bufferCommitResponse",
                     None,

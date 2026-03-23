@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "io-std"] }
 tokio-stream = "0.1"
 fern = { version = "0.6", features = ["colored"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -24,6 +24,9 @@ rand = "0.8"
 openssl = "0.10"
 toml = "0.8"
 ed25519-zebra = { version = "4.1", features = ["alloc"] }
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+chrono = "0.4"
+serde_json = "1.0"

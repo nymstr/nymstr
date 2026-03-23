@@ -4,6 +4,7 @@ mod db_utils;
 mod log_config;
 mod message_utils;
 mod rate_limiter;
+mod transport;
 
 use crate::config::GroupConfig;
 use crate::crypto_utils::CryptoUtils;
@@ -63,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     // Parse CLI arguments
     let mut set_admin_path: Option<PathBuf> = None;
     let mut do_register = false;
+    let mut stdio_mode = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -80,6 +82,10 @@ async fn main() -> anyhow::Result<()> {
             }
             "--register" => {
                 do_register = true;
+                i += 1;
+            }
+            "--stdio" => {
+                stdio_mode = true;
                 i += 1;
             }
             _ => {
@@ -122,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Normal server mode
-    run_server(group_config).await
+    run_server(group_config, stdio_mode).await
 }
 
 /// Run the registration flow with discovery server
@@ -137,7 +143,7 @@ async fn run_registration(config: &mut GroupConfig, config_path: &Path) -> anyho
     if let Some(parent) = PathBuf::from(&log_file).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    init_logging(&log_file)?;
+    init_logging(&log_file, false)?;
 
     // Setup crypto
     let keys_dir = std::env::var("KEYS_DIR").unwrap_or_else(|_| "storage/keys".to_string());
@@ -305,13 +311,13 @@ async fn run_registration(config: &mut GroupConfig, config_path: &Path) -> anyho
 }
 
 /// Run the normal group server
-async fn run_server(group_config: GroupConfig) -> anyhow::Result<()> {
+async fn run_server(group_config: GroupConfig, stdio_mode: bool) -> anyhow::Result<()> {
     // Initialize logging
     let log_file = std::env::var("LOG_FILE_PATH").unwrap_or_else(|_| "logs/groupd.log".to_string());
     if let Some(parent) = PathBuf::from(&log_file).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    init_logging(&log_file)?;
+    init_logging(&log_file, stdio_mode)?;
 
     log::info!(
         "Starting group server: {} ({})",
@@ -395,12 +401,39 @@ async fn run_server(group_config: GroupConfig) -> anyhow::Result<()> {
         crypto.generate_key_pair(&client_id)?;
     }
 
+    // Backfill group_members for any existing users (migration for pre-auth-check data)
+    let group_id = group_config.group_id.clone();
+    match db.get_all_usernames().await {
+        Ok(usernames) => {
+            for uname in &usernames {
+                if let Err(e) = db.add_group_member(&group_id, uname).await {
+                    log::warn!("Failed to backfill group member {}: {}", uname, e);
+                }
+            }
+            if !usernames.is_empty() {
+                log::info!(
+                    "Backfilled {} existing users as group members",
+                    usernames.len()
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to fetch usernames for migration: {}", e);
+        }
+    }
+
+    let admin_key = group_config.admin_public_key.clone();
+
+    if stdio_mode {
+        return run_stdio_mode(client_id, db, crypto, admin_key, group_id).await;
+    }
+
+    // --- Nym mixnet mode ---
     let storage_dir =
         std::env::var("NYM_SDK_STORAGE").unwrap_or_else(|_| format!("storage/{}", client_id));
     std::fs::create_dir_all(&storage_dir)?;
     let storage_paths = StoragePaths::new_from_dir(PathBuf::from(&storage_dir))?;
 
-    // Build and connect the mixnet client
     let builder = MixnetClientBuilder::new_with_default_storage(storage_paths).await?;
     let client_inner = builder.build()?.connect_to_mixnet().await?;
     let sender = client_inner.split_sender();
@@ -408,10 +441,7 @@ async fn run_server(group_config: GroupConfig) -> anyhow::Result<()> {
     log::info!("Connected to mixnet. Nym Address: {}", address);
 
     let mut client_stream = client_inner;
-
-    // Start processing incoming messages
-    let admin_key = group_config.admin_public_key.clone();
-    let mut message_utils = MessageUtils::new(client_id, sender, db, crypto, admin_key);
+    let mut message_utils = MessageUtils::new(client_id, Box::new(transport::NymReplySender::new(sender)), db, crypto, admin_key, group_id);
 
     tokio::select! {
         _ = async {
@@ -425,5 +455,58 @@ async fn run_server(group_config: GroupConfig) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Run the group server in stdio mode for testing.
+async fn run_stdio_mode(
+    client_id: String,
+    db: DbUtils,
+    crypto: CryptoUtils,
+    admin_key: Option<String>,
+    group_id: String,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    log::info!("Starting group server in stdio mode");
+    let sender = Box::new(transport::StdioReplySender::new());
+    let mut message_utils = MessageUtils::new(client_id, sender, db, crypto, admin_key, group_id);
+
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        let envelope: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                log::error!("stdio: JSON parse error: {}", e);
+                eprintln!("{{\"error\": \"invalid JSON: {}\"}}", e);
+                continue;
+            }
+        };
+
+        let reply_tag = envelope
+            .get("replyTag")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
+
+        let message = envelope
+            .get("message")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| line.clone());
+
+        let tag = Some(transport::ReplyTag::Stdio(reply_tag));
+        message_utils
+            .process_message(tag, message.into_bytes())
+            .await;
+    }
+
+    log::info!("stdio: stdin closed, shutting down");
     Ok(())
 }

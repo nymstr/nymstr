@@ -87,7 +87,8 @@ impl DbUtils {
             );
             CREATE INDEX IF NOT EXISTS idx_pending_welcomes_user ON pending_welcomes(username);
 
-            -- Track current epoch for each MLS group
+            -- DEPRECATED: Server no longer tracks MLS epochs (RFC 9420 compliance).
+            -- Table retained for backward compatibility with existing databases.
             CREATE TABLE IF NOT EXISTS group_epochs (
                 group_id      TEXT PRIMARY KEY,
                 current_epoch INTEGER NOT NULL DEFAULT 0,
@@ -105,12 +106,19 @@ impl DbUtils {
             );
             CREATE INDEX IF NOT EXISTS idx_buffered_commits_group_epoch ON buffered_commits(group_id, epoch);
 
-            -- Track which epoch each member is at (for targeted sync)
+            -- DEPRECATED: Server no longer tracks per-member epochs (RFC 9420 compliance).
+            -- Table retained for backward compatibility with existing databases.
             CREATE TABLE IF NOT EXISTS member_epochs (
                 group_id TEXT NOT NULL,
                 username TEXT NOT NULL,
                 epoch    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (group_id, username)
+            );
+
+            -- Deduplication table for sendGroup messages (prevents replay)
+            CREATE TABLE IF NOT EXISTS recent_message_hashes (
+                hash       TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
             );
             "#,
         )
@@ -163,7 +171,7 @@ impl DbUtils {
             is_discoverable
         );
         let res = sqlx::query(
-            "INSERT INTO groups (groupId, groupName, admin, isPublic, isDiscoverable) VALUES (?, ?, ?, ?, ?)"
+            "INSERT OR IGNORE INTO groups (groupId, groupName, admin, isPublic, isDiscoverable) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(group_id)
         .bind(group_name)
@@ -185,7 +193,7 @@ impl DbUtils {
             group_id,
             username
         );
-        let res = sqlx::query("INSERT INTO group_members (groupId, username) VALUES (?, ?)")
+        let res = sqlx::query("INSERT OR IGNORE INTO group_members (groupId, username) VALUES (?, ?)")
             .bind(group_id)
             .bind(username)
             .execute(&self.pool)
@@ -469,30 +477,39 @@ impl DbUtils {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Get or initialize the current epoch for a group.
-    pub async fn get_group_epoch(&self, group_id: &str) -> Result<i64> {
-        log::info!("get_group_epoch: group_id={}", group_id);
-        let row = sqlx::query("SELECT current_epoch FROM group_epochs WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| r.get(0)).unwrap_or(0))
+    /// Count pending welcomes for a user (for quota enforcement).
+    pub async fn count_pending_welcomes_for_user(&self, username: &str) -> Result<i64> {
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM pending_welcomes WHERE username = ?")
+                .bind(username)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(row.0)
     }
 
-    /// Update the current epoch for a group.
-    pub async fn update_group_epoch(&self, group_id: &str, epoch: i64) -> Result<bool> {
-        log::info!("update_group_epoch: group_id={}, epoch={}", group_id, epoch);
-        let timestamp = chrono::Utc::now().to_rfc3339();
-        let res = sqlx::query(
-            "INSERT OR REPLACE INTO group_epochs (group_id, current_epoch, updated_at) VALUES (?, ?, ?)",
+    /// Check if a user is a member of a group.
+    pub async fn is_group_member(&self, group_id: &str, username: &str) -> Result<bool> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM group_members WHERE groupId = ? AND username = ?",
         )
         .bind(group_id)
-        .bind(epoch)
-        .bind(&timestamp)
-        .execute(&self.pool)
+        .bind(username)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(res.rows_affected() > 0)
+        Ok(row.is_some())
     }
+
+    /// Get all registered usernames.
+    pub async fn get_all_usernames(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT username FROM users")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    // NOTE: get_group_epoch and update_group_epoch have been removed.
+    // Per RFC 9420, the Delivery Service should not track MLS epochs.
+    // The group_epochs table is retained for backward compatibility but is no longer written to.
 
     /// Buffer a commit message for epoch sync.
     pub async fn buffer_commit(
@@ -522,84 +539,79 @@ impl DbUtils {
         Ok(res.last_insert_rowid())
     }
 
-    /// Get buffered commits since a given epoch (for catch-up). Returns Vec<(epoch, commit_msg, sender)>.
-    pub async fn get_commits_since_epoch(
+    /// Get buffered commits since a given sequential ID (cursor-based fetch).
+    /// Returns Vec<(id, epoch, commit_msg, sender)> ordered by id ascending, limited to 100 rows.
+    /// The `id` is the autoincrement primary key, used as a cursor for pagination.
+    pub async fn get_commits_since_id(
         &self,
         group_id: &str,
-        since_epoch: i64,
-    ) -> Result<Vec<(i64, Vec<u8>, String)>> {
+        since_id: i64,
+    ) -> Result<Vec<(i64, i64, Vec<u8>, String)>> {
         log::info!(
-            "get_commits_since_epoch: group_id={}, since_epoch={}",
+            "get_commits_since_id: group_id={}, since_id={}",
             group_id,
-            since_epoch
+            since_id
         );
         let rows = sqlx::query(
-            "SELECT epoch, commit_msg, sender FROM buffered_commits WHERE group_id = ? AND epoch > ? ORDER BY epoch ASC",
+            "SELECT id, epoch, commit_msg, sender FROM buffered_commits WHERE group_id = ? AND id > ? ORDER BY id ASC LIMIT 100",
         )
         .bind(group_id)
-        .bind(since_epoch)
+        .bind(since_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
             .collect())
     }
 
-    /// Update or insert a member's epoch.
-    pub async fn update_member_epoch(
-        &self,
-        group_id: &str,
-        username: &str,
-        epoch: i64,
-    ) -> Result<bool> {
-        log::info!(
-            "update_member_epoch: group_id={}, username={}, epoch={}",
-            group_id,
-            username,
-            epoch
-        );
+    // NOTE: update_member_epoch and get_member_epoch have been removed.
+    // Per RFC 9420, the Delivery Service should not track per-member epoch state.
+    // The member_epochs table is retained for backward compatibility but is no longer written to.
+
+    /// Check if a message hash already exists; if not, store it.
+    /// Returns true if the hash is new (not a duplicate), false if already seen.
+    pub async fn check_and_store_message_hash(&self, hash: &str) -> Result<bool> {
+        let now = chrono::Utc::now().timestamp();
         let res = sqlx::query(
-            "INSERT OR REPLACE INTO member_epochs (group_id, username, epoch) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO recent_message_hashes (hash, created_at) VALUES (?, ?)",
         )
-        .bind(group_id)
-        .bind(username)
-        .bind(epoch)
+        .bind(hash)
+        .bind(now)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
     }
 
-    /// Get a member's current epoch.
-    pub async fn get_member_epoch(&self, group_id: &str, username: &str) -> Result<i64> {
-        log::info!(
-            "get_member_epoch: group_id={}, username={}",
-            group_id,
-            username
-        );
-        let row =
-            sqlx::query("SELECT epoch FROM member_epochs WHERE group_id = ? AND username = ?")
-                .bind(group_id)
-                .bind(username)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(|r| r.get(0)).unwrap_or(0))
-    }
-
-    /// Clean up old buffered commits (keep last N epochs).
-    pub async fn cleanup_old_commits(&self, group_id: &str, keep_epochs: i64) -> Result<u64> {
-        log::info!(
-            "cleanup_old_commits: group_id={}, keep_epochs={}",
-            group_id,
-            keep_epochs
-        );
-        let current_epoch = self.get_group_epoch(group_id).await?;
-        let cutoff = current_epoch.saturating_sub(keep_epochs);
-        let res = sqlx::query("DELETE FROM buffered_commits WHERE group_id = ? AND epoch < ?")
-            .bind(group_id)
+    /// Delete message hashes older than the given age in seconds.
+    pub async fn cleanup_old_message_hashes(&self, max_age_secs: i64) -> Result<u64> {
+        let cutoff = chrono::Utc::now().timestamp() - max_age_secs;
+        let res = sqlx::query("DELETE FROM recent_message_hashes WHERE created_at < ?")
             .bind(cutoff)
             .execute(&self.pool)
             .await?;
+        log::info!(
+            "cleanup_old_message_hashes: deleted {} entries",
+            res.rows_affected()
+        );
+        Ok(res.rows_affected())
+    }
+
+    /// Clean up old buffered commits (keep last N commits by count).
+    pub async fn cleanup_old_commits(&self, group_id: &str, keep_count: i64) -> Result<u64> {
+        log::info!(
+            "cleanup_old_commits: group_id={}, keep_count={}",
+            group_id,
+            keep_count
+        );
+        let res = sqlx::query(
+            "DELETE FROM buffered_commits WHERE group_id = ? AND id NOT IN (SELECT id FROM buffered_commits WHERE group_id = ? ORDER BY id DESC LIMIT ?)",
+        )
+        .bind(group_id)
+        .bind(group_id)
+        .bind(keep_count)
+        .execute(&self.pool)
+        .await?;
         log::info!(
             "cleanup_old_commits: deleted {} commits",
             res.rows_affected()
