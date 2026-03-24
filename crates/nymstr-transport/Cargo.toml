@@ -1,0 +1,11 @@
+[package]
+name = "nymstr-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+anyhow = "1.0"
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync", "io-util", "io-std"] }
+nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }

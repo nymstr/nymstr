@@ -13,14 +13,14 @@ use std::sync::Arc;
 struct TestClient {
     username: String,
     public_key: String,
-    crypto: server_rust::crypto_utils::CryptoUtils,
-    tag: server_rust::transport::ReplyTag,
+    crypto: nymstr_server::crypto_utils::CryptoUtils,
+    tag: nymstr_server::transport::ReplyTag,
 }
 
 /// Shared test server that wraps MessageUtils + CapturingReplySender.
 struct TestServer {
-    message_utils: server_rust::message_utils::MessageUtils,
-    sender: Arc<server_rust::transport::CapturingReplySender>,
+    message_utils: nymstr_server::message_utils::MessageUtils,
+    sender: Arc<nymstr_server::transport::CapturingReplySender>,
 }
 
 impl TestServer {
@@ -34,7 +34,7 @@ impl TestServer {
         std::fs::write(&secret_path, "test-seed-phrase-for-e2e").unwrap();
 
         let crypto =
-            server_rust::crypto_utils::CryptoUtils::new(keys_dir, "test-seed-phrase-for-e2e".into())
+            nymstr_server::crypto_utils::CryptoUtils::new(keys_dir, "test-seed-phrase-for-e2e".into())
                 .unwrap();
 
         // Generate server keypair
@@ -44,12 +44,12 @@ impl TestServer {
         if !db_path.exists() {
             std::fs::File::create(&db_path).unwrap();
         }
-        let db = server_rust::db_utils::DbUtils::new(db_path.to_str().unwrap())
+        let db = nymstr_server::db_utils::DbUtils::new(db_path.to_str().unwrap())
             .await
             .unwrap();
 
-        let sender = Arc::new(server_rust::transport::CapturingReplySender::new());
-        let message_utils = server_rust::message_utils::MessageUtils::new(
+        let sender = Arc::new(nymstr_server::transport::CapturingReplySender::new());
+        let message_utils = nymstr_server::message_utils::MessageUtils::new(
             "server".to_string(),
             Box::new(Arc::clone(&sender)),
             db,
@@ -65,7 +65,7 @@ impl TestServer {
     /// Send a message and return all replies generated.
     async fn send(
         &mut self,
-        tag: &server_rust::transport::ReplyTag,
+        tag: &nymstr_server::transport::ReplyTag,
         message: Value,
     ) -> Vec<(String, Value)> {
         let bytes = message.to_string().into_bytes();
@@ -91,11 +91,11 @@ impl TestClient {
         std::fs::create_dir_all(&keys_dir).unwrap();
 
         let crypto =
-            server_rust::crypto_utils::CryptoUtils::new(keys_dir, "client-password".into())
+            nymstr_server::crypto_utils::CryptoUtils::new(keys_dir, "client-password".into())
                 .unwrap();
         let public_key = crypto.generate_key_pair(username).unwrap();
 
-        let tag = server_rust::transport::ReplyTag::Stdio(username.to_string());
+        let tag = nymstr_server::transport::ReplyTag::Stdio(username.to_string());
 
         TestClient {
             username: username.to_string(),

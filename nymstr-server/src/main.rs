@@ -1,9 +1,9 @@
-use server_rust::crypto_utils::CryptoUtils;
-use server_rust::db_utils::DbUtils;
-use server_rust::env_loader::load_env;
-use server_rust::log_config::init_logging;
-use server_rust::message_utils::MessageUtils;
-use server_rust::transport::{NymReplySender, ReplyTag, StdioReplySender};
+use nymstr_server::crypto_utils::CryptoUtils;
+use nymstr_server::db_utils::DbUtils;
+use nymstr_server::env_loader::load_env;
+use nymstr_server::log_config::init_logging;
+use nymstr_server::message_utils::MessageUtils;
+use nymstr_server::transport::{NymReplySender, ReplyTag, StdioReplySender};
 use bip39::{Language, Mnemonic};
 use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
 use std::io::{self, Write};

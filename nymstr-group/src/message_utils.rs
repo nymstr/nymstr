@@ -1,6 +1,6 @@
 use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::DbUtils;
-use crate::transport::{ReplyTag, ReplySender};
+use nymstr_transport::{ReplyTag, ReplySender};
 use nymstr_common::rate_limiter::RateLimiter;
 use nymstr_common::validation;
 use chrono::Utc;

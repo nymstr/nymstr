@@ -28,7 +28,7 @@ impl StdioServer {
         // Write a dummy seed phrase
         std::fs::write(&secret_path, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_server-rust"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nymstr-server"))
             .arg("--stdio")
             .env("DATABASE_PATH", &db_path)
             .env("KEYS_DIR", keys_dir.to_str().unwrap())

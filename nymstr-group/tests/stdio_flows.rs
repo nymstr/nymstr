@@ -43,7 +43,7 @@ registered = false
         )
         .unwrap();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nymstr-groupd"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nymstr-group"))
             .arg("--stdio")
             .env("DATABASE_PATH", &db_path)
             .env("KEYS_DIR", keys_dir.to_str().unwrap())

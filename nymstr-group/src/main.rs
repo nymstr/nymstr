@@ -2,7 +2,6 @@ mod config;
 mod crypto_utils;
 mod db_utils;
 mod message_utils;
-mod transport;
 
 use crate::config::GroupConfig;
 use crate::crypto_utils::CryptoUtils;
@@ -439,7 +438,7 @@ async fn run_server(group_config: GroupConfig, stdio_mode: bool) -> anyhow::Resu
     log::info!("Connected to mixnet. Nym Address: {}", address);
 
     let mut client_stream = client_inner;
-    let mut message_utils = MessageUtils::new(client_id, Box::new(transport::NymReplySender::new(sender)), db, crypto, admin_key, group_id);
+    let mut message_utils = MessageUtils::new(client_id, Box::new(nymstr_transport::NymReplySender::new(sender)), db, crypto, admin_key, group_id);
 
     tokio::select! {
         _ = async {
@@ -467,7 +466,7 @@ async fn run_stdio_mode(
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     log::info!("Starting group server in stdio mode");
-    let sender = Box::new(transport::StdioReplySender::new());
+    let sender = Box::new(nymstr_transport::StdioReplySender::new());
     let mut message_utils = MessageUtils::new(client_id, sender, db, crypto, admin_key, group_id);
 
     let stdin = BufReader::new(tokio::io::stdin());
@@ -499,7 +498,7 @@ async fn run_stdio_mode(
             .map(|v| v.to_string())
             .unwrap_or_else(|| line.clone());
 
-        let tag = Some(transport::ReplyTag::Stdio(reply_tag));
+        let tag = Some(nymstr_transport::ReplyTag::Stdio(reply_tag));
         message_utils
             .process_message(tag, message.into_bytes())
             .await;

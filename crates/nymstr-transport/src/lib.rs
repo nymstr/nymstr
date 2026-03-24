@@ -1,7 +1,7 @@
 //! Transport abstraction layer for mixnet and stdio-based communication.
 //!
-//! Provides a `ReplyTag` enum and `ReplySender` trait so that `MessageUtils`
-//! can operate identically over the Nym mixnet or a stdio pipe (for testing).
+//! Provides `ReplyTag` and `ReplySender` so that message handlers can operate
+//! identically over the Nym mixnet, a stdio pipe, or an in-process test harness.
 
 use async_trait::async_trait;
 use nym_sdk::mixnet::{AnonymousSenderTag, MixnetClientSender, MixnetMessageSender};
@@ -9,6 +9,10 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// ReplyTag
+// ---------------------------------------------------------------------------
 
 /// A reply destination — either a real Nym SURB tag or a stdio session ID.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -36,7 +40,6 @@ impl From<AnonymousSenderTag> for ReplyTag {
 
 impl ReplyTag {
     /// Reconstruct a `ReplyTag` from a string previously produced by `Display`.
-    /// Handles both `"stdio:xxx"` prefixed IDs and base58-encoded Nym tags.
     pub fn from_stored_string(s: &str) -> Option<Self> {
         if let Some(id) = s.strip_prefix("stdio:") {
             Some(ReplyTag::Stdio(id.to_string()))
@@ -48,19 +51,26 @@ impl ReplyTag {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ReplySender trait
+// ---------------------------------------------------------------------------
+
 /// Trait for sending reply messages back to a client.
 #[async_trait]
 pub trait ReplySender: Send + Sync {
     async fn send_reply(&self, tag: &ReplyTag, message: String) -> anyhow::Result<()>;
 }
 
-/// Blanket impl: `Arc<T>` implements `ReplySender` if `T` does.
 #[async_trait]
 impl<T: ReplySender> ReplySender for Arc<T> {
     async fn send_reply(&self, tag: &ReplyTag, message: String) -> anyhow::Result<()> {
         (**self).send_reply(tag, message).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// Implementations
+// ---------------------------------------------------------------------------
 
 /// Wraps a real `MixnetClientSender` for production use.
 pub struct NymReplySender {
@@ -88,35 +98,7 @@ impl ReplySender for NymReplySender {
     }
 }
 
-/// Captures replies in memory for in-process testing.
-pub struct CapturingReplySender {
-    replies: Mutex<Vec<(String, String)>>, // (tag_string, message_json)
-}
-
-impl CapturingReplySender {
-    pub fn new() -> Self {
-        Self {
-            replies: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// Take all captured replies, clearing the buffer.
-    pub async fn take_replies(&self) -> Vec<(String, String)> {
-        let mut replies = self.replies.lock().await;
-        std::mem::take(&mut *replies)
-    }
-}
-
-#[async_trait]
-impl ReplySender for CapturingReplySender {
-    async fn send_reply(&self, tag: &ReplyTag, message: String) -> anyhow::Result<()> {
-        let mut replies = self.replies.lock().await;
-        replies.push((tag.to_string(), message));
-        Ok(())
-    }
-}
-
-/// Writes replies as newline-delimited JSON to stdout (for testing).
+/// Writes replies as newline-delimited JSON to stdout (for testing/debugging).
 pub struct StdioReplySender {
     stdout: Mutex<tokio::io::Stdout>,
 }
@@ -142,6 +124,34 @@ impl ReplySender for StdioReplySender {
         out.write_all(envelope.to_string().as_bytes()).await?;
         out.write_all(b"\n").await?;
         out.flush().await?;
+        Ok(())
+    }
+}
+
+/// Captures replies in memory for in-process testing.
+pub struct CapturingReplySender {
+    replies: Mutex<Vec<(String, String)>>,
+}
+
+impl CapturingReplySender {
+    pub fn new() -> Self {
+        Self {
+            replies: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Take all captured replies, clearing the buffer.
+    pub async fn take_replies(&self) -> Vec<(String, String)> {
+        let mut replies = self.replies.lock().await;
+        std::mem::take(&mut *replies)
+    }
+}
+
+#[async_trait]
+impl ReplySender for CapturingReplySender {
+    async fn send_reply(&self, tag: &ReplyTag, message: String) -> anyhow::Result<()> {
+        let mut replies = self.replies.lock().await;
+        replies.push((tag.to_string(), message));
         Ok(())
     }
 }
