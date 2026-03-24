@@ -4,6 +4,7 @@
 //! components (server, group server, desktop client).
 
 pub mod keypair;
+pub mod mls;
 pub mod server_key_manager;
 pub mod signing;
 

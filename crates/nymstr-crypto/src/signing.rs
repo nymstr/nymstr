@@ -151,6 +151,27 @@ impl PgpSigner {
             Err(_) => false,
         }
     }
+
+    /// Validate that a public key is suitable for signing.
+    pub fn validate_signing_key(public_key: &SignedPublicKey) -> Result<()> {
+        let has_user_ids = !public_key.details.users.is_empty();
+        if !has_user_ids {
+            log::warn!("PGP key has no user IDs - this may cause issues");
+        }
+
+        let created = public_key.primary_key.created_at();
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+
+        let created_timestamp = created.timestamp() as u32;
+        if now.saturating_sub(created_timestamp) > (10 * 365 * 24 * 60 * 60) {
+            log::warn!("PGP key is older than 10 years, consider renewal");
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
