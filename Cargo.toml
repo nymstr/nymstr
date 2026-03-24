@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-    "servers/nymstr-server",
-    "servers/nymstr-group",
+    "crates/nymstr-common",
+    "nymstr-server",
+    "nymstr-group",
     "app/desktop",
 ]

@@ -1,15 +1,19 @@
+//! Logging initialization with fern.
+//!
+//! Supports colored terminal output, file logging, RUST_LOG env var,
+//! and stdio_mode to suppress stdout (for JSON pipe testing).
+
 use chrono::Local;
-use fern::{
-    colors::{Color, ColoredLevelConfig},
-    Dispatch,
-};
+use fern::colors::{Color, ColoredLevelConfig};
+use fern::Dispatch;
 use log::LevelFilter;
 use std::io;
 
-/// Initialize logging to file and stdout with timestamps and colored levels.
-/// When `stdio_mode` is true, logs go only to the file (stdout is reserved for protocol messages).
+/// Initialize logging to file and optionally stdout.
+///
+/// When `stdio_mode` is true, logs go only to the file
+/// (stdout is reserved for protocol messages).
 pub fn init_logging(log_file: &str, stdio_mode: bool) -> anyhow::Result<()> {
-    // configure colors for terminal output
     let colors = ColoredLevelConfig::new()
         .error(Color::Red)
         .warn(Color::Yellow)
@@ -17,7 +21,6 @@ pub fn init_logging(log_file: &str, stdio_mode: bool) -> anyhow::Result<()> {
         .debug(Color::Cyan)
         .trace(Color::BrightBlack);
 
-    // Get log level from RUST_LOG environment variable, default to Info
     let log_level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|level| match level.to_lowercase().as_str() {

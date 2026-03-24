@@ -1,12 +1,12 @@
-//! Rate limiting for authentication endpoints.
+//! Rate limiting for authentication and general endpoints.
 //!
 //! Provides a sliding window rate limiter to prevent brute-force attacks.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// Sliding window rate limiter to prevent brute-force attacks on authentication endpoints.
-/// Tracks attempts per sender_tag within a configurable time window.
+/// Sliding window rate limiter to prevent brute-force attacks.
+/// Tracks attempts per key within a configurable time window.
 pub struct RateLimiter {
     attempts: HashMap<String, Vec<Instant>>,
     max_attempts: usize,
@@ -14,7 +14,6 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// Create a new rate limiter with specified limits.
     pub fn new(max_attempts: usize, window_secs: u64) -> Self {
         Self {
             attempts: HashMap::new(),
@@ -30,15 +29,14 @@ impl RateLimiter {
         let window = Duration::from_secs(self.window_secs);
 
         let attempts = self.attempts.entry(key.to_string()).or_default();
-        // Remove old attempts outside the window
         attempts.retain(|&t| now.duration_since(t) < window);
 
         if attempts.len() >= self.max_attempts {
-            return false; // Rate limited
+            return false;
         }
 
         attempts.push(now);
-        true // Allowed
+        true
     }
 
     /// Remove empty entries to prevent memory growth.
@@ -52,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rate_limiter_allows_within_limit() {
+    fn test_allows_within_limit() {
         let mut limiter = RateLimiter::new(3, 60);
         assert!(limiter.check_and_record("test"));
         assert!(limiter.check_and_record("test"));
@@ -60,28 +58,26 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limiter_blocks_at_limit() {
+    fn test_blocks_at_limit() {
         let mut limiter = RateLimiter::new(2, 60);
         assert!(limiter.check_and_record("test"));
         assert!(limiter.check_and_record("test"));
-        assert!(!limiter.check_and_record("test")); // Should be blocked
+        assert!(!limiter.check_and_record("test"));
     }
 
     #[test]
-    fn test_rate_limiter_separate_keys() {
+    fn test_separate_keys() {
         let mut limiter = RateLimiter::new(1, 60);
         assert!(limiter.check_and_record("key1"));
-        assert!(!limiter.check_and_record("key1")); // Blocked
-        assert!(limiter.check_and_record("key2")); // Different key, allowed
+        assert!(!limiter.check_and_record("key1"));
+        assert!(limiter.check_and_record("key2"));
     }
 
     #[test]
-    fn test_rate_limiter_cleanup() {
+    fn test_cleanup() {
         let mut limiter = RateLimiter::new(10, 60);
         limiter.check_and_record("test");
         assert!(!limiter.attempts.is_empty());
-
-        // Manually clear the attempts to simulate expiry
         limiter.attempts.get_mut("test").unwrap().clear();
         limiter.cleanup();
         assert!(limiter.attempts.is_empty());

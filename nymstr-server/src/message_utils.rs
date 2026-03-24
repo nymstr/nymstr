@@ -1,8 +1,9 @@
 use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::{DbUtils, QueryResult};
 use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
-use crate::rate_limiter::RateLimiter;
 use crate::transport::{ReplyTag, ReplySender};
+use nymstr_common::rate_limiter::RateLimiter;
+use nymstr_common::validation;
 use nym_sdk::mixnet::ReconstructedMessage;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -64,24 +65,6 @@ impl MessageUtils {
                 Self::SEND_RATE_LIMIT_WINDOW_SECS,
             ),
         }
-    }
-
-    /// Check if a username is valid: non-empty, max 64 chars, alphanumeric + '-' or '_'.
-    fn is_valid_username(username: &str) -> bool {
-        !username.is_empty()
-            && username.len() <= 64
-            && username
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    }
-
-    /// Check if a group ID is valid: non-empty, max 128 chars, alphanumeric + '-' or '_'.
-    fn is_valid_group_id(group_id: &str) -> bool {
-        !group_id.is_empty()
-            && group_id.len() <= 128
-            && group_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     }
 
     /// Remove stale entries from all pending HashMaps that exceed the TTL.
@@ -397,7 +380,7 @@ impl MessageUtils {
         }
         let username = username.unwrap();
         let pubkey = public_key.unwrap();
-        if !Self::is_valid_username(username) {
+        if !validation::is_valid_username(username) {
             self.send_encapsulated_reply(
                 &sender_tag,
                 "error: invalid username format".into(),
@@ -855,7 +838,7 @@ impl MessageUtils {
         let public_key = public_key.unwrap();
 
         // Validate group_id format
-        if !Self::is_valid_group_id(group_id) {
+        if !validation::is_valid_group_id(group_id) {
             self.send_encapsulated_reply(
                 &sender_tag,
                 "error: invalid groupId format".into(),
@@ -1222,7 +1205,7 @@ impl MessageUtils {
         let public_key = payload.get("publicKey").and_then(Value::as_str);
 
         if let (Some(username), Some(public_key)) = (username, public_key) {
-            if !Self::is_valid_username(username) {
+            if !validation::is_valid_username(username) {
                 let response_payload = json!({"result": "error", "context": "registration", "message": "invalid username"});
                 self.send_unified_reply(
                     &sender_tag,
@@ -2381,41 +2364,4 @@ impl MessageUtils {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_valid_username() {
-        assert!(MessageUtils::is_valid_username("valid_user123"));
-        assert!(MessageUtils::is_valid_username("user-name"));
-        assert!(MessageUtils::is_valid_username("user_name"));
-        assert!(MessageUtils::is_valid_username("123user"));
-        // Max length (64 chars)
-        assert!(MessageUtils::is_valid_username(&"a".repeat(64)));
-
-        assert!(!MessageUtils::is_valid_username(""));
-        assert!(!MessageUtils::is_valid_username("invalid user"));
-        assert!(!MessageUtils::is_valid_username("user@domain"));
-        assert!(!MessageUtils::is_valid_username("user.name"));
-        assert!(!MessageUtils::is_valid_username("user%name"));
-        // Over max length (65 chars)
-        assert!(!MessageUtils::is_valid_username(&"a".repeat(65)));
-    }
-
-    #[test]
-    fn test_is_valid_group_id() {
-        assert!(MessageUtils::is_valid_group_id("valid-group-123"));
-        assert!(MessageUtils::is_valid_group_id("group_name"));
-        assert!(MessageUtils::is_valid_group_id("GroupName123"));
-        // Max length (128 chars)
-        assert!(MessageUtils::is_valid_group_id(&"a".repeat(128)));
-
-        assert!(!MessageUtils::is_valid_group_id(""));
-        assert!(!MessageUtils::is_valid_group_id("invalid group"));
-        assert!(!MessageUtils::is_valid_group_id("group@id"));
-        assert!(!MessageUtils::is_valid_group_id("group.id"));
-        // Over max length (129 chars)
-        assert!(!MessageUtils::is_valid_group_id(&"a".repeat(129)));
-    }
-}
+// Validation tests are in nymstr-common::validation::tests

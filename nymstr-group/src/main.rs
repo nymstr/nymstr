@@ -1,16 +1,14 @@
 mod config;
 mod crypto_utils;
 mod db_utils;
-mod log_config;
 mod message_utils;
-mod rate_limiter;
 mod transport;
 
 use crate::config::GroupConfig;
 use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::DbUtils;
-use crate::log_config::init_logging;
 use crate::message_utils::MessageUtils;
+use nymstr_common::logging::init_logging;
 use nym_sdk::mixnet::{MixnetClientBuilder, MixnetMessageSender, StoragePaths};
 use std::path::{Path, PathBuf};
 use tokio_stream::StreamExt;

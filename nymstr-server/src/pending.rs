@@ -1,23 +1,6 @@
-//! Pending entry types for tracking in-progress operations.
-//!
-//! These types wrap data with TTL support for automatic cleanup.
+//! Server-specific pending entry types for tracking in-progress operations.
 
-use std::time::Instant;
-
-/// Wrapper for pending entries with TTL support
-pub struct PendingEntry<T> {
-    pub data: T,
-    pub created_at: Instant,
-}
-
-impl<T> PendingEntry<T> {
-    pub fn new(data: T) -> Self {
-        Self {
-            data,
-            created_at: Instant::now(),
-        }
-    }
-}
+pub use nymstr_common::pending::PendingEntry;
 
 /// Pending user registration data (username, public_key, nonce)
 pub type PendingUserData = (String, String, String);

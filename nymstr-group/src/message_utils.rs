@@ -1,7 +1,8 @@
 use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::DbUtils;
-use crate::rate_limiter::RateLimiter;
 use crate::transport::{ReplyTag, ReplySender};
+use nymstr_common::rate_limiter::RateLimiter;
+use nymstr_common::validation;
 use chrono::Utc;
 use nym_sdk::mixnet::ReconstructedMessage;
 use serde_json::{json, Value};
@@ -253,23 +254,7 @@ impl MessageUtils {
     /// Maximum number of pending welcomes per user
     const MAX_WELCOMES_PER_USER: i64 = 20;
 
-    /// Check if a username is valid: non-empty, max 64 chars, alphanumeric + '-' or '_'.
-    fn is_valid_username(username: &str) -> bool {
-        !username.is_empty()
-            && username.len() <= 64
-            && username
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    }
 
-    /// Check if a group ID is valid: non-empty, max 128 chars, alphanumeric + '-' or '_'.
-    fn is_valid_group_id(group_id: &str) -> bool {
-        !group_id.is_empty()
-            && group_id.len() <= 128
-            && group_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    }
 
     /// Create a new MessageUtils instance.
     pub fn new(
@@ -462,7 +447,7 @@ impl MessageUtils {
         signed_content: &str,
     ) -> Option<String> {
         // Validate username format (non-empty, max 64 chars, alphanumeric/-/_)
-        if !Self::is_valid_username(&auth.username) || auth.username == "unknown" {
+        if !validation::is_valid_username(&auth.username) || auth.username == "unknown" {
             self.send_encapsulated_reply(
                 &sender_tag,
                 "error: missing or invalid username".into(),
@@ -634,7 +619,7 @@ impl MessageUtils {
         }
 
         // Validate username format (non-empty, max 64 chars, alphanumeric/-/_)
-        if !Self::is_valid_username(&req.username) {
+        if !validation::is_valid_username(&req.username) {
             log::warn!("Invalid username format in registration: {}", req.username);
             self.send_encapsulated_reply(
                 &sender_tag,
@@ -1244,7 +1229,7 @@ impl MessageUtils {
 
         // Extract and validate group_id
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
-            Some(g) if Self::is_valid_group_id(g) => g,
+            Some(g) if validation::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
                     &sender_tag,
@@ -1259,7 +1244,7 @@ impl MessageUtils {
 
         // Extract and validate target username
         let target_username = match payload.get("targetUsername").and_then(Value::as_str) {
-            Some(u) if Self::is_valid_username(u) => u,
+            Some(u) if validation::is_valid_username(u) => u,
             _ => {
                 self.send_encapsulated_reply(
                     &sender_tag,
@@ -1594,7 +1579,7 @@ impl MessageUtils {
         }
 
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
-            Some(g) if Self::is_valid_group_id(g) => g,
+            Some(g) if validation::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
                     &sender_tag,
@@ -1693,7 +1678,7 @@ impl MessageUtils {
         }
 
         let group_id = match payload.get("groupId").and_then(Value::as_str) {
-            Some(g) if Self::is_valid_group_id(g) => g,
+            Some(g) if validation::is_valid_group_id(g) => g,
             _ => {
                 self.send_encapsulated_reply(
                     &sender_tag,
@@ -1812,41 +1797,4 @@ impl MessageUtils {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_valid_username() {
-        assert!(MessageUtils::is_valid_username("valid_user123"));
-        assert!(MessageUtils::is_valid_username("user-name"));
-        assert!(MessageUtils::is_valid_username("user_name"));
-        assert!(MessageUtils::is_valid_username("123user"));
-        // Max length (64 chars)
-        assert!(MessageUtils::is_valid_username(&"a".repeat(64)));
-
-        assert!(!MessageUtils::is_valid_username(""));
-        assert!(!MessageUtils::is_valid_username("invalid user"));
-        assert!(!MessageUtils::is_valid_username("user@domain"));
-        assert!(!MessageUtils::is_valid_username("user.name"));
-        assert!(!MessageUtils::is_valid_username("user%name"));
-        // Over max length (65 chars)
-        assert!(!MessageUtils::is_valid_username(&"a".repeat(65)));
-    }
-
-    #[test]
-    fn test_is_valid_group_id() {
-        assert!(MessageUtils::is_valid_group_id("valid-group-123"));
-        assert!(MessageUtils::is_valid_group_id("group_name"));
-        assert!(MessageUtils::is_valid_group_id("GroupName123"));
-        // Max length (128 chars)
-        assert!(MessageUtils::is_valid_group_id(&"a".repeat(128)));
-
-        assert!(!MessageUtils::is_valid_group_id(""));
-        assert!(!MessageUtils::is_valid_group_id("invalid group"));
-        assert!(!MessageUtils::is_valid_group_id("group@id"));
-        assert!(!MessageUtils::is_valid_group_id("group.id"));
-        // Over max length (129 chars)
-        assert!(!MessageUtils::is_valid_group_id(&"a".repeat(129)));
-    }
-}
+// Validation tests are in nymstr-common::validation::tests
