@@ -1,10 +1,9 @@
 mod config;
-mod crypto_utils;
 mod db_utils;
 mod message_utils;
 
 use crate::config::GroupConfig;
-use crate::crypto_utils::CryptoUtils;
+use nymstr_crypto::ServerKeyManager;
 use crate::db_utils::DbUtils;
 use crate::message_utils::MessageUtils;
 use nymstr_common::logging::init_logging;
@@ -179,15 +178,15 @@ async fn run_registration(config: &mut GroupConfig, config_path: &Path) -> anyho
         pwd
     };
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "groupd".to_string());
-    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), client_id.clone(), password)?;
+    let crypto = ServerKeyManager::new(PathBuf::from(&keys_dir), password)?;
 
     // Ensure keypair exists
-    let pub_key_path = PathBuf::from(&keys_dir).join(format!("{}_public.asc", client_id));
-    let public_key = if !pub_key_path.exists() {
+    let public_key = if !crypto.keys_exist(&client_id) {
         log::info!("Generating new PGP keypair for registration");
         crypto.generate_key_pair(&client_id)?
     } else {
-        std::fs::read_to_string(&pub_key_path)?
+        let pk = crypto.load_public_key(&client_id)?;
+        nymstr_crypto::PgpKeyManager::public_key_armored(&pk)?
     };
 
     // Connect to mixnet
@@ -386,11 +385,10 @@ async fn run_server(group_config: GroupConfig, stdio_mode: bool) -> anyhow::Resu
     };
 
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "groupd".to_string());
-    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), client_id.clone(), password)?;
+    let crypto = ServerKeyManager::new(PathBuf::from(&keys_dir), password)?;
 
     // Ensure the server has a PGP keypair
-    let pub_key_path = PathBuf::from(&keys_dir).join(format!("{}_public.asc", client_id));
-    if !pub_key_path.exists() {
+    if !crypto.keys_exist(&client_id) {
         log::info!(
             "Server keypair not found, generating new PGP keypair for '{}'",
             client_id
@@ -459,7 +457,7 @@ async fn run_server(group_config: GroupConfig, stdio_mode: bool) -> anyhow::Resu
 async fn run_stdio_mode(
     client_id: String,
     db: DbUtils,
-    crypto: CryptoUtils,
+    crypto: ServerKeyManager,
     admin_key: Option<String>,
     group_id: String,
 ) -> anyhow::Result<()> {

@@ -1,4 +1,4 @@
-use crate::crypto_utils::CryptoUtils;
+use nymstr_crypto::ServerKeyManager;
 use crate::db_utils::DbUtils;
 use nymstr_transport::{ReplyTag, ReplySender};
 use nymstr_common::rate_limiter::RateLimiter;
@@ -221,7 +221,7 @@ impl FetchGroupRequest {
 /// - No presence tracking, no push notifications
 pub struct MessageUtils {
     db: DbUtils,
-    crypto: CryptoUtils,
+    crypto: ServerKeyManager,
     sender: Box<dyn ReplySender>,
     client_id: String,
     admin_public_key: Option<String>,
@@ -261,7 +261,7 @@ impl MessageUtils {
         client_id: String,
         sender: Box<dyn ReplySender>,
         db: DbUtils,
-        crypto: CryptoUtils,
+        crypto: ServerKeyManager,
         admin_public_key: Option<String>,
         group_id: String,
     ) -> Self {
@@ -488,7 +488,7 @@ impl MessageUtils {
         // Verify signature
         if !self
             .crypto
-            .verify_pgp_signature(&public_key, signed_content, &auth.signature)
+            .verify_signature(&public_key, signed_content, &auth.signature)
         {
             self.send_encapsulated_reply(
                 &sender_tag,
@@ -665,7 +665,7 @@ impl MessageUtils {
         );
         if !self
             .crypto
-            .verify_pgp_signature(&req.public_key, &signed_content, &req.signature)
+            .verify_signature(&req.public_key, &signed_content, &req.signature)
         {
             log::warn!("Bad signature for registration: {}", req.username);
             self.send_encapsulated_reply(
@@ -880,7 +880,7 @@ impl MessageUtils {
         );
         if !self
             .crypto
-            .verify_pgp_signature(admin_key, &signed_content, &req.signature)
+            .verify_signature(admin_key, &signed_content, &req.signature)
         {
             self.send_encapsulated_reply(
                 &sender_tag,
@@ -1024,13 +1024,10 @@ impl MessageUtils {
 
         // Dedup check: compute SHA-256 of "{sender}:{ciphertext}" and reject duplicates
         let dedup_input = format!("{}:{}", username, req.ciphertext);
-        let hash_hex = match openssl::hash::hash(openssl::hash::MessageDigest::sha256(), dedup_input.as_bytes()) {
-            Ok(bytes) => hex::encode(&bytes),
-            Err(e) => {
-                log::error!("Failed to compute message hash: {}", e);
-                // Fall through without dedup on hash error
-                String::new()
-            }
+        let hash_hex = {
+            use sha2::{Sha256, Digest};
+            let hash = Sha256::digest(dedup_input.as_bytes());
+            hex::encode(hash)
         };
         if !hash_hex.is_empty() {
             match self.db.check_and_store_message_hash(&hash_hex).await {

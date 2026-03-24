@@ -1,4 +1,4 @@
-use nymstr_server::crypto_utils::CryptoUtils;
+use nymstr_crypto::ServerKeyManager;
 use nymstr_server::db_utils::DbUtils;
 use nymstr_server::env_loader::load_env;
 use nymstr_server::log_config::init_logging;
@@ -129,26 +129,18 @@ async fn generate_server_keys() -> anyhow::Result<()> {
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
 
     // Initialize crypto utils
-    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password)?;
+    let crypto = ServerKeyManager::new(PathBuf::from(&keys_dir), password)?;
 
     // Check if keys already exist
-    let priv_path = PathBuf::from(&keys_dir).join(format!("{}_private_key.enc", client_id));
-    let pub_path = PathBuf::from(&keys_dir).join(format!("{}_public_key.asc", client_id));
-
-    if priv_path.exists() && pub_path.exists() {
+    if crypto.keys_exist(&client_id) {
         println!("Server keys already exist for client_id: {}", client_id);
-        println!("Private key: {}", priv_path.display());
-        println!("Public key: {}", pub_path.display());
         return Ok(());
     }
 
     // Generate key pair for the server's client_id
     println!("Generating key pair for server client_id: {}", client_id);
-    let _public_key = crypto.generate_key_pair(&client_id)?;
-
+    crypto.generate_key_pair(&client_id)?;
     println!("Server key pair generated successfully!");
-    println!("Public key stored at: {}", pub_path.display());
-    println!("Private key stored at: {}", priv_path.display());
     println!("Server can now sign messages during user registration.");
 
     Ok(())
@@ -197,12 +189,10 @@ async fn main() -> anyhow::Result<()> {
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
 
     // Initialize utilities
-    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password)?;
+    let crypto = ServerKeyManager::new(PathBuf::from(&keys_dir), password)?;
 
     // Check if server keypair exists, generate if missing (first run auto-setup)
-    let priv_path = PathBuf::from(&keys_dir).join(format!("{}_private_key.enc", client_id));
-    let pub_path = PathBuf::from(&keys_dir).join(format!("{}_public_key.asc", client_id));
-    if !priv_path.exists() || !pub_path.exists() {
+    if !crypto.keys_exist(&client_id) {
         log::info!(
             "Server keypair not found for client_id '{}', generating...",
             client_id
@@ -252,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_stdio_mode(
     client_id: String,
     db: DbUtils,
-    crypto: CryptoUtils,
+    crypto: ServerKeyManager,
 ) -> anyhow::Result<()> {
     log::info!("Starting server in stdio mode");
     let sender = Box::new(StdioReplySender::new());

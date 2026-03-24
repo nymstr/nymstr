@@ -1,0 +1,20 @@
+[package]
+name = "nymstr-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+hmac = "0.12"
+log = "0.4"
+pgp = "0.16"
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2.5"
+zeroize = { version = "1.7", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

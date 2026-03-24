@@ -1,5 +1,5 @@
-use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::{DbUtils, QueryResult};
+use nymstr_crypto::ServerKeyManager;
 use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
 use crate::transport::{ReplyTag, ReplySender};
 use nymstr_common::rate_limiter::RateLimiter;
@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Handler for incoming mixnet messages and command processing.
 pub struct MessageUtils {
     db: DbUtils,
-    crypto: CryptoUtils,
+    crypto: ServerKeyManager,
     sender: Box<dyn ReplySender>,
     client_id: String,
     pending_users: HashMap<ReplyTag, PendingEntry<PendingUserData>>,
@@ -46,7 +46,7 @@ impl MessageUtils {
         client_id: String,
         sender: Box<dyn ReplySender>,
         db: DbUtils,
-        crypto: CryptoUtils,
+        crypto: ServerKeyManager,
     ) -> Self {
         MessageUtils {
             sender,

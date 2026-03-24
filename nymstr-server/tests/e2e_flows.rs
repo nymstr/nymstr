@@ -13,7 +13,7 @@ use std::sync::Arc;
 struct TestClient {
     username: String,
     public_key: String,
-    crypto: nymstr_server::crypto_utils::CryptoUtils,
+    crypto: nymstr_crypto::ServerKeyManager,
     tag: nymstr_server::transport::ReplyTag,
 }
 
@@ -34,7 +34,7 @@ impl TestServer {
         std::fs::write(&secret_path, "test-seed-phrase-for-e2e").unwrap();
 
         let crypto =
-            nymstr_server::crypto_utils::CryptoUtils::new(keys_dir, "test-seed-phrase-for-e2e".into())
+            nymstr_crypto::ServerKeyManager::new(keys_dir, "test-seed-phrase-for-e2e".into())
                 .unwrap();
 
         // Generate server keypair
@@ -91,7 +91,7 @@ impl TestClient {
         std::fs::create_dir_all(&keys_dir).unwrap();
 
         let crypto =
-            nymstr_server::crypto_utils::CryptoUtils::new(keys_dir, "client-password".into())
+            nymstr_crypto::ServerKeyManager::new(keys_dir, "client-password".into())
                 .unwrap();
         let public_key = crypto.generate_key_pair(username).unwrap();
 
