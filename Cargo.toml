@@ -7,4 +7,5 @@ members = [
     "nymstr-server",
     "nymstr-group",
     "app/desktop",
+    "tests/e2e",
 ]
