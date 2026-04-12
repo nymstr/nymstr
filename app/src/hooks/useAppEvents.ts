@@ -20,9 +20,11 @@ export function useAppEvents() {
   const addMessage = useChatStore((s) => s.addMessage);
   const updateMessageStatus = useChatStore((s) => s.updateMessageStatus);
   const updateConversation = useChatStore((s) => s.updateConversation);
+  const addConversation = useChatStore((s) => s.addConversation);
   const incrementUnread = useChatStore((s) => s.incrementUnread);
   const updateContactOnlineStatus = useChatStore((s) => s.updateContactOnlineStatus);
   const setMessageSending = useChatStore((s) => s.setMessageSending);
+  const removePendingHandshake = useChatStore((s) => s.removePendingHandshake);
 
   // Connection store actions
   const setConnecting = useConnectionStore((s) => s.setConnecting);
@@ -39,10 +41,14 @@ export function useAppEvents() {
   const addContactRequest = useGroupStore((s) => s.addContactRequest);
 
   useEffect(() => {
+    // Guard against StrictMode's double-invocation: setup() is async, so a
+    // naive `unlisten` assignment races with the second mount and leaves two
+    // listeners alive. Track cancellation + unlisten both synchronously.
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
 
     const setup = async () => {
-      unlisten = await onAppEvent({
+      const fn = await onAppEvent({
         // Handle incoming messages
         onMessage: (message, conversationId) => {
           // Backend emits normalized DM IDs (dm:user1:user2) but the frontend
@@ -51,6 +57,25 @@ export function useAppEvents() {
           const effectiveId = conversationId.startsWith('dm:')
             ? message.sender
             : conversationId;
+
+          // Ensure the conversation exists — incoming messages from a newly
+          // accepted handshake, or from an existing contact on cold start,
+          // must auto-create a sidebar entry. addConversation dedupes by id.
+          const existing = useChatStore
+            .getState()
+            .conversations.find((c) => c.id === effectiveId);
+          if (!existing) {
+            addConversation({
+              id: effectiveId,
+              type: conversationId.startsWith('dm:') ? 'direct' : 'group',
+              name: effectiveId,
+              unreadCount: 0,
+              online: false,
+            });
+          }
+
+          // The peer replied → handshake is settled, allow sending.
+          removePendingHandshake(message.sender);
 
           // Add message to the conversation
           addMessage(effectiveId, message);
@@ -191,6 +216,27 @@ export function useAppEvents() {
           showToast.info('Message request', `${username} wants to message you`);
         },
 
+        // Handshake finalized (peer accepted our request) — drop the pending
+        // state and make sure the conversation is in the sidebar so the user
+        // can start messaging immediately without waiting for an inbound DM.
+        onConversationEstablished: (peer) => {
+          console.log(`[Event] Conversation established with ${peer}`);
+          removePendingHandshake(peer);
+          const existing = useChatStore
+            .getState()
+            .conversations.find((c) => c.id === peer);
+          if (!existing) {
+            addConversation({
+              id: peer,
+              type: 'direct',
+              name: peer,
+              unreadCount: 0,
+              online: false,
+            });
+          }
+          showToast.success('Request accepted', `@${peer} is ready to chat`);
+        },
+
         // Handle contact online status changes
         onContactStatus: (username, online) => {
           updateContactOnlineStatus(username, online);
@@ -212,11 +258,18 @@ export function useAppEvents() {
           }
         },
       });
+
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
     };
 
     setup();
 
     return () => {
+      cancelled = true;
       if (unlisten) {
         unlisten();
       }
@@ -229,9 +282,11 @@ export function useAppEvents() {
     addMessage,
     updateMessageStatus,
     updateConversation,
+    addConversation,
     incrementUnread,
     updateContactOnlineStatus,
     setMessageSending,
+    removePendingHandshake,
     // Connection store
     setConnecting,
     setConnected,

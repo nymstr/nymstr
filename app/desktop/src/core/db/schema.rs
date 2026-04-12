@@ -306,7 +306,9 @@ async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // Contact requests table - incoming DM requests pending user action
+    // Contact requests table - incoming DM requests pending user action.
+    // signature + timestamp are captured from the sealed envelope so we can
+    // defer PGP verification until the user clicks Accept.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS contact_requests (
@@ -315,17 +317,14 @@ async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
             received_at TEXT NOT NULL DEFAULT (datetime('now')),
             status TEXT NOT NULL DEFAULT 'pending',
             welcome_payload TEXT,
+            signature TEXT,
+            timestamp INTEGER,
             UNIQUE(from_username)
         )
         "#,
     )
     .execute(db)
     .await?;
-
-    // Migrate: add welcome_payload column if missing (table may pre-date this column)
-    let _ = sqlx::query("ALTER TABLE contact_requests ADD COLUMN welcome_payload TEXT")
-        .execute(db)
-        .await;
 
     // Pending handshakes table - tracks DM handshakes awaiting p2pWelcomeAck
     sqlx::query(

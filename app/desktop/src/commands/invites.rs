@@ -46,17 +46,19 @@ pub async fn accept_contact_request(
 ) -> Result<serde_json::Value, ApiError> {
     use crate::crypto::mls::MlsMessageType;
 
-    // Fetch the stored welcome payload
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT welcome_payload FROM contact_requests WHERE from_username = ? AND status = 'pending'",
+    // Fetch the stored welcome payload + signature + timestamp so we can
+    // verify the sender's PGP signature against the server-provided key below.
+    let row: Option<(String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT welcome_payload, signature, timestamp FROM contact_requests \
+         WHERE from_username = ? AND status = 'pending'",
     )
     .bind(&from_username)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let welcome_payload_json = match row {
-        Some((payload,)) => payload,
+    let (welcome_payload_json, stored_signature, stored_timestamp) = match row {
+        Some((payload, sig, ts)) => (payload, sig, ts),
         None => return Err(ApiError::not_found("Contact request not found or already handled")),
     };
 
@@ -135,6 +137,27 @@ pub async fn accept_contact_request(
             }
         }
     };
+
+    // Deferred signature verification: the message loop stored the request
+    // without validating the signature (so the invite shows up fast). Now
+    // that the user clicked Accept and we have the authoritative public key,
+    // verify the stored signature before trusting the welcome.
+    let signature = stored_signature.ok_or_else(|| {
+        ApiError::internal("Stored contact request is missing signature — refusing to accept")
+    })?;
+    let timestamp = stored_timestamp.ok_or_else(|| {
+        ApiError::internal("Stored contact request is missing timestamp — refusing to accept")
+    })?;
+    let sender_pgp_pubkey = crate::crypto::pgp::PgpKeyManager::parse_public_key(&sender_public_key)
+        .map_err(|e| ApiError::internal(format!("Invalid sender public key: {}", e)))?;
+    let sign_content = format!("{}:{}:{}", from_username, timestamp, welcome_payload_json);
+    crate::crypto::pgp::PgpSigner::verify_detached(
+        &sender_pgp_pubkey,
+        sign_content.as_bytes(),
+        &signature,
+    )
+    .map_err(|e| ApiError::validation(format!("Sender signature invalid: {}", e)))?;
+    tracing::info!("Deferred signature verification passed for {}", from_username);
 
     let handler = DirectMessageHandlerBuilder::new()
         .mls_client(mls_client)

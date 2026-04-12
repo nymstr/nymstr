@@ -534,10 +534,40 @@ async fn handle_sealed_message(
     let current_user = state.get_current_user().await
         .ok_or_else(|| anyhow::anyhow!("No user logged in"))?;
 
-    // Look up sender's PGP public key from contacts; if unknown, fetch from server
-    let sender_pubkey_armored = match crate::core::db::ContactDb::get_contact_public_key(
+    let inner_action = sealed_content.payload
+        .get("inner_action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("send");
+
+    // Look up sender's PGP public key from contacts.
+    let known_pubkey = crate::core::db::ContactDb::get_contact_public_key(
         &state.db, &current_user.username, &real_sender,
-    ).await? {
+    ).await?;
+
+    // Fast path: a p2pWelcome from an unknown sender. Skip the server round-trip
+    // for the sender's public key and defer signature verification to the point
+    // where the user clicks Accept. The invite shows up immediately.
+    if inner_action == "p2pWelcome" && known_pubkey.is_none() {
+        tracing::info!(
+            "Received p2pWelcome from unknown sender {} — storing as contact request unverified",
+            real_sender
+        );
+        store_unverified_welcome(
+            emitter,
+            state,
+            &real_sender,
+            &sealed_content.payload,
+            &sealed_content.signature,
+            sealed_content.timestamp,
+        ).await?;
+        return Ok(());
+    }
+
+    // All other paths require a verified signature. For p2pWelcomeAck or
+    // application messages the sender should already be a contact (we added
+    // them during startChat / acceptContactRequest). If not, fall back to
+    // fetching the key from the discovery server.
+    let sender_pubkey_armored = match known_pubkey {
         Some(pk) => pk,
         None => {
             tracing::info!(
@@ -577,13 +607,6 @@ async fn handle_sealed_message(
         .db(state.db.clone())
         .build()?;
 
-    // Dispatch on inner_action (carried inside the sealed payload, hidden from server).
-    // Default (missing/unknown) is a regular DM application message.
-    let inner_action = sealed_content.payload
-        .get("inner_action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("send");
-
     match inner_action {
         "p2pWelcome" => {
             handle_sealed_welcome(
@@ -619,37 +642,57 @@ async fn handle_sealed_message(
     Ok(())
 }
 
-/// Process an unsealed p2pWelcome. Mirrors the former cleartext p2pWelcome
-/// handler but reads sender from the sealed envelope rather than the outer one.
-async fn handle_sealed_welcome(
+/// Store a p2pWelcome from an unknown sender as a pending contact request
+/// without fetching the sender's public key or verifying the signature.
+/// Verification is deferred until the user clicks Accept, which lets the
+/// invite appear in the inbox immediately.
+async fn store_unverified_welcome(
     emitter: &EventEmitter,
+    state: &Arc<AppState>,
+    sender: &str,
+    payload: &serde_json::Value,
+    signature: &str,
+    timestamp: i64,
+) -> anyhow::Result<()> {
+    let welcome_payload_json = serde_json::to_string(payload).unwrap_or_default();
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO contact_requests
+            (from_username, received_at, status, welcome_payload, signature, timestamp)
+        VALUES (?, datetime('now'), 'pending', ?, ?, ?)
+        "#,
+    )
+    .bind(sender)
+    .bind(&welcome_payload_json)
+    .bind(signature)
+    .bind(timestamp)
+    .execute(&state.db)
+    .await?;
+
+    emitter.contact_request_received(sender.to_string());
+    tracing::info!("Stored unverified p2pWelcome from {} as contact request", sender);
+    Ok(())
+}
+
+/// Process an unsealed p2pWelcome from a **known contact**. Unknown-sender
+/// welcomes are handled by `store_unverified_welcome` without signature
+/// verification so the invite can appear instantly; the signature is checked
+/// when the user clicks Accept.
+async fn handle_sealed_welcome(
+    _emitter: &EventEmitter,
     state: &Arc<AppState>,
     handler: &crate::core::message_handler::DirectMessageHandler,
     sender: &str,
-    sender_pubkey_armored: &str,
+    _sender_pubkey_armored: &str,
     payload: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    tracing::info!("Received sealed p2pWelcome from {}", sender);
-
-    let current_user = state.get_current_user().await
-        .ok_or_else(|| anyhow::anyhow!("No user logged in"))?;
+    tracing::info!("Received sealed p2pWelcome from known contact {}", sender);
 
     // Skip if we already have a completed conversation with this user
     if handler.conversation_exists(sender).await {
         tracing::info!("Conversation already exists with {}, skipping duplicate p2pWelcome", sender);
         return Ok(());
     }
-
-    let is_known_contact: bool = {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT COUNT(*) FROM contacts WHERE owner_username = ? AND username = ?"
-        )
-        .bind(&current_user.username)
-        .bind(sender)
-        .fetch_optional(&state.db)
-        .await?;
-        row.map(|(c,)| c > 0).unwrap_or(false)
-    };
 
     let welcome_message = payload
         .get("welcomeMessage")
@@ -661,41 +704,12 @@ async fn handle_sealed_welcome(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if is_known_contact {
-        handler.process_incoming_message(sender, welcome_message, MlsMessageType::Welcome).await?;
-        handler.send_welcome_ack(sender, conversation_id, true).await?;
+    handler.process_incoming_message(sender, welcome_message, MlsMessageType::Welcome).await?;
+    handler.send_welcome_ack(sender, conversation_id, true).await?;
 
-        drain_pending_messages(handler, &state.db, sender).await;
+    drain_pending_messages(handler, &state.db, sender).await;
 
-        tracing::info!("Joined conversation with known contact {} and sent p2pWelcomeAck", sender);
-    } else {
-        // Unknown sender — cache their verified pubkey and store as contact request.
-        // Signature was already verified against the server-fetched key, so we can
-        // trust sender identity when the user accepts the request.
-        let _ = sqlx::query(
-            "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)"
-        )
-        .bind(sender)
-        .bind(sender_pubkey_armored)
-        .execute(&state.db)
-        .await;
-
-        let welcome_payload_json = serde_json::to_string(payload).unwrap_or_default();
-        sqlx::query(
-            r#"
-            INSERT OR REPLACE INTO contact_requests (from_username, received_at, status, welcome_payload)
-            VALUES (?, datetime('now'), 'pending', ?)
-            "#,
-        )
-        .bind(sender)
-        .bind(&welcome_payload_json)
-        .execute(&state.db)
-        .await?;
-
-        emitter.contact_request_received(sender.to_string());
-        tracing::info!("Stored p2pWelcome from unknown sender {} as contact request", sender);
-    }
-
+    tracing::info!("Joined conversation with {} and sent p2pWelcomeAck", sender);
     Ok(())
 }
 

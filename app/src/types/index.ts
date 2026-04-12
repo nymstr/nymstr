@@ -128,6 +128,7 @@ export type AppEvent =
   | { type: 'ContactOnline'; payload: { username: string; online: boolean } }
   | { type: 'SystemNotification'; payload: { message: string } }
   | { type: 'ContactRequestReceived'; payload: { username: string } }
+  | { type: 'ConversationEstablished'; payload: { conversationId: string; peer: string } }
   | { type: 'BackgroundTasksStarted'; payload: Record<string, never> }
   | { type: 'BackgroundTasksStopped'; payload: Record<string, never> };
 
