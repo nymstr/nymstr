@@ -34,26 +34,15 @@ async fn test_registration_message_sequence() -> Result<()> {
     Ok(())
 }
 
-/// Test complete login flow message sequence
+/// Test ping/pong message sequence (replaces login)
 #[tokio::test]
-async fn test_login_message_sequence() -> Result<()> {
-    // 1. Client sends login request
-    let login_msg = MixnetMessage::login("alice");
-    assert_eq!(login_msg.action, "login");
-    assert_eq!(login_msg.payload["username"], "alice");
-
-    // 2. Server sends challenge
-    let challenge_msg = MixnetMessage::challenge("server", "alice", "nonce456", "login");
-    assert_eq!(challenge_msg.action, "challenge");
-    assert_eq!(challenge_msg.payload["context"], "login");
-
-    // 3. Client responds with signed nonce
-    let response_msg = MixnetMessage::challenge_response("alice", "server", "signed_nonce", "login");
-    assert_eq!(response_msg.action, "loginResponse");
-
-    // 4. Server confirms login
-    let confirm_msg = MixnetMessage::login_response("server", "alice", "success", "login");
-    assert_eq!(confirm_msg.action, "loginResponse");
+async fn test_ping_message_sequence() -> Result<()> {
+    // Client sends signed ping with timestamp
+    let ping_msg = MixnetMessage::ping("alice", 1234567890, "signed_ping");
+    assert_eq!(ping_msg.action, "ping");
+    assert_eq!(ping_msg.sender, "alice");
+    assert_eq!(ping_msg.payload["timestamp"], 1234567890);
+    assert_eq!(ping_msg.signature, "signed_ping");
 
     Ok(())
 }
@@ -62,7 +51,7 @@ async fn test_login_message_sequence() -> Result<()> {
 #[tokio::test]
 async fn test_dm_handshake_flow() -> Result<()> {
     // 1. Alice queries Bob's public key
-    let query_msg = MixnetMessage::query("alice", "bob");
+    let query_msg = MixnetMessage::query("bob");
     assert_eq!(query_msg.action, "query");
 
     // 2. Server responds with Bob's info

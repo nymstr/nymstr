@@ -97,12 +97,14 @@ impl ContactDb {
         Ok(contacts)
     }
 
-    /// Get contact's public key
+    /// Get contact's public key, scoped by owner
     pub async fn get_contact_public_key(
         pool: &SqlitePool,
+        owner_username: &str,
         username: &str,
     ) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT public_key FROM contacts WHERE username = ?")
+        let row = sqlx::query("SELECT public_key FROM contacts WHERE owner_username = ? AND username = ?")
+            .bind(owner_username)
             .bind(username)
             .fetch_optional(pool)
             .await?;

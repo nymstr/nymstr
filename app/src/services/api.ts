@@ -16,11 +16,11 @@ export async function registerUser(
   return invoke('register_user', { username, passphrase });
 }
 
-export async function loginUser(
+export async function pingServer(
   username: string,
   passphrase: string
 ): Promise<User> {
-  return invoke('login_user', { username, passphrase });
+  return invoke('ping_server', { username, passphrase });
 }
 
 export async function logout(): Promise<void> {

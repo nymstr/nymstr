@@ -13,7 +13,10 @@ pub mod types;
 
 pub use client::{MlsClient, MlsKeyManager, PgpCredential, PgpIdentityProvider};
 pub use epoch_buffer::{BufferStats, BufferedMessage, EpochAwareBuffer, PendingMlsMessage};
-pub use key_packages::{KeyPackageManager, KeyPackageValidationResult};
+pub use key_packages::{
+    generate_signed_bundle, verify_bundle, KeyPackageManager, KeyPackageValidationResult,
+    SignedKeyPackageBundle,
+};
 pub use types::{
     ConversationInfo, ConversationType, CredentialValidationResult, EncryptedMessage,
     MlsAddMemberResult, MlsCredential, MlsGroupInfo, MlsGroupInfoPublic, MlsMessageType,

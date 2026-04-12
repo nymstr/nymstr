@@ -15,7 +15,8 @@ use serde_json::json;
 use sqlx::SqlitePool;
 
 use crate::crypto::mls::{EncryptedMessage, MlsClient, MlsMessageType};
-use crate::crypto::pgp::{ArcPassphrase, ArcSecretKey, PgpSigner};
+use crate::crypto::pgp::{ArcPassphrase, ArcSecretKey, PgpKeyManager, PgpSigner};
+use crate::core::db::ContactDb;
 use crate::core::mixnet_client::MixnetService;
 
 /// Normalize conversation ID to ensure consistent ordering (alphabetical)
@@ -112,12 +113,21 @@ impl DirectMessageHandler {
             .map_err(|e| anyhow!("Invalid MLS group ID: {}", e))
     }
 
-    /// Check if an MLS conversation exists with a recipient
+    /// Check if a completed MLS conversation exists with a recipient
     pub async fn conversation_exists(&self, recipient: &str) -> bool {
         match self.get_mls_group_id(recipient).await {
             Ok(mls_group_id) => self.mls_client.group_exists(&mls_group_id),
             Err(_) => false,
         }
+    }
+
+    /// Check if a handshake is already in progress (pending or completed) with a recipient.
+    /// Used for deduplication to prevent duplicate key package exchanges.
+    pub async fn handshake_in_progress(&self, recipient: &str) -> bool {
+        if self.conversation_exists(recipient).await {
+            return true;
+        }
+        self.get_pending_handshake(recipient).await.is_ok()
     }
 
     /// Get the normalized conversation ID for a recipient
@@ -181,7 +191,57 @@ impl DirectMessageHandler {
         PgpSigner::sign_detached_secure(&self.pgp_secret_key, content.as_bytes(), &self.pgp_passphrase)
     }
 
-    /// Send an encrypted direct message
+    /// Seal an inner payload with sealed sender and send to recipient.
+    ///
+    /// Signs `"{sender}:{timestamp}:{payload_json}"`, wraps into a `SealedContent`,
+    /// encrypts it with the recipient's Curve25519 public key (ECDH + AES-GCM), and
+    /// sends via the sealed sender mixnet path. The relay server sees only the
+    /// recipient — the real sender is hidden inside the encrypted envelope.
+    async fn seal_and_send(&self, recipient: &str, inner_payload: serde_json::Value) -> Result<()> {
+        use pgp::types::KeyDetails;
+
+        // Sign: "{sender}:{timestamp}:{payload_json}"
+        let timestamp = chrono::Utc::now().timestamp();
+        let payload_str = serde_json::to_string(&inner_payload)
+            .map_err(|e| anyhow!("Failed to serialize payload: {}", e))?;
+        let sign_content = format!("{}:{}:{}", self.current_user, timestamp, payload_str);
+        let signature = self.sign_message(&sign_content)?;
+
+        let sender_fingerprint = self.pgp_secret_key.fingerprint().to_string();
+
+        let sealed_content = nymstr_crypto::sealed_sender::SealedContent {
+            sender: self.current_user.clone(),
+            sender_key_fingerprint: sender_fingerprint,
+            payload: inner_payload,
+            signature,
+            timestamp,
+        };
+
+        // Look up recipient's PGP public key from contacts and extract Curve25519 key
+        let recipient_pubkey_armored =
+            ContactDb::get_contact_public_key(&self.db, &self.current_user, recipient)
+                .await?
+                .ok_or_else(|| anyhow!("No public key found for contact {}", recipient))?;
+        let recipient_pgp_pubkey = PgpKeyManager::parse_public_key(&recipient_pubkey_armored)?;
+        let recipient_curve25519 =
+            nymstr_crypto::sealed_sender::extract_curve25519_public(&recipient_pgp_pubkey)?;
+
+        let sealed_bytes =
+            nymstr_crypto::sealed_sender::seal(&sealed_content, &recipient_curve25519)?;
+        let sealed_b64 = base64::engine::general_purpose::STANDARD.encode(&sealed_bytes);
+
+        self.mixnet_service
+            .send_sealed_message(recipient, &sealed_b64)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Send an encrypted direct message using sealed sender
+    ///
+    /// The message is first encrypted with MLS, then wrapped in a sealed sender
+    /// envelope that hides our identity from the relay server. Only the recipient
+    /// can decrypt the outer envelope to learn who sent the message.
     pub async fn send_message(&self, recipient: &str, content: &str) -> Result<()> {
         // Look up the real MLS group ID from DB
         let mls_group_id = self.get_mls_group_id(recipient).await.map_err(|_| {
@@ -200,7 +260,7 @@ impl DirectMessageHandler {
         }
 
         log::info!(
-            "Sending encrypted message from {} to {}",
+            "Sending sealed-sender message from {} to {}",
             self.current_user,
             recipient
         );
@@ -214,32 +274,20 @@ impl DirectMessageHandler {
             .encrypt_message(&mls_group_id, wrapped.as_bytes())
             .await?;
 
-        // Build the same payload that will be sent, and sign the serialized form
+        // Build the inner MLS payload
         let conversation_id_b64 =
             base64::engine::general_purpose::STANDARD.encode(&encrypted.conversation_id);
         let ciphertext_b64 =
             base64::engine::general_purpose::STANDARD.encode(&encrypted.mls_message);
-        let payload = serde_json::json!({
+        let inner_payload = serde_json::json!({
             "conversation_id": conversation_id_b64,
             "mls_message": ciphertext_b64
         });
-        let payload_str = serde_json::to_string(&payload)
-            .map_err(|e| anyhow!("Failed to serialize payload: {}", e))?;
-        let signature = self.sign_message(&payload_str)?;
 
-        // Send via mixnet
-        self.mixnet_service
-            .send_mls_message(
-                &self.current_user,
-                recipient,
-                &encrypted.conversation_id,
-                &encrypted.mls_message,
-                &signature,
-            )
-            .await?;
+        self.seal_and_send(recipient, inner_payload).await?;
 
         log::info!(
-            "Successfully sent encrypted message to {} in conversation {}",
+            "Successfully sent sealed-sender message to {} in conversation {}",
             recipient,
             conversation_id_b64
         );
@@ -428,24 +476,25 @@ impl DirectMessageHandler {
         // Store pending handshake — do NOT store conversation mapping yet
         self.store_pending_handshake(recipient, &mls_group_id, &conversation_id).await?;
 
-        // Sign the welcome message
-        let signature = self.sign_message(&welcome_b64)?;
+        // Build sealed welcome payload. The `inner_action` field tells the recipient
+        // how to dispatch this after unsealing. Sender identity is carried inside the
+        // encrypted SealedContent; the server only sees the recipient (for routing).
+        let mut inner_payload = serde_json::json!({
+            "inner_action": "p2pWelcome",
+            "welcomeMessage": welcome_b64,
+            "groupId": conversation_id,
+        });
+        if let Some(commit) = commit_b64.as_deref() {
+            inner_payload["commitMessage"] = serde_json::json!(commit);
+        }
+        if let Some(rt) = ratchet_tree_b64.as_deref() {
+            inner_payload["ratchetTree"] = serde_json::json!(rt);
+        }
 
-        // Send welcome + commit + ratchet tree via discovery server relay
-        self.mixnet_service
-            .send_p2p_welcome(
-                &self.current_user,
-                recipient,
-                &welcome_b64,
-                &conversation_id,
-                commit_b64.as_deref(),
-                ratchet_tree_b64.as_deref(),
-                &signature,
-            )
-            .await?;
+        self.seal_and_send(recipient, inner_payload).await?;
 
         log::info!(
-            "MLS handshake Welcome sent to {} (pending ack before finalization)",
+            "Sealed MLS handshake Welcome sent to {} (pending ack before finalization)",
             recipient
         );
         Ok(())
@@ -569,20 +618,15 @@ impl DirectMessageHandler {
         conversation_id: &str,
         accepted: bool,
     ) -> Result<()> {
-        let sign_content = format!("p2pWelcomeAck:{}:{}:{}", self.current_user, conversation_id, accepted);
-        let signature = self.sign_message(&sign_content)?;
+        let inner_payload = serde_json::json!({
+            "inner_action": "p2pWelcomeAck",
+            "conversationId": conversation_id,
+            "accepted": accepted,
+        });
 
-        self.mixnet_service
-            .send_p2p_welcome_ack(
-                &self.current_user,
-                recipient,
-                conversation_id,
-                accepted,
-                &signature,
-            )
-            .await?;
+        self.seal_and_send(recipient, inner_payload).await?;
 
-        log::info!("Sent p2pWelcomeAck to {} (accepted={})", recipient, accepted);
+        log::info!("Sent sealed p2pWelcomeAck to {} (accepted={})", recipient, accepted);
         Ok(())
     }
 }

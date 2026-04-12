@@ -79,42 +79,6 @@ impl AuthenticationHandler {
         }
     }
 
-    /// Handle login challenge from server
-    ///
-    /// Signs the raw nonce with our PGP key and sends the response back to the server.
-    /// The PGP library handles hashing internally during sign/verify.
-    pub async fn process_login_challenge(&self, username: &str, nonce: &str) -> Result<()> {
-        tracing::info!("Processing login challenge for user: {}", username);
-
-        // Sign the raw nonce with our PGP key (PGP handles hashing internally)
-        let signature =
-            PgpSigner::sign_detached_secure(&self.pgp_secret_key, nonce.as_bytes(), &self.pgp_passphrase)?;
-
-        // Send login challenge response
-        self.service
-            .send_login_response(username, &signature)
-            .await?;
-
-        tracing::info!("Sent login challenge response for user: {}", username);
-        Ok(())
-    }
-
-    /// Handle login response from server
-    ///
-    /// Returns true if login was successful, false otherwise.
-    pub fn process_login_response(&self, username: &str, result: &str) -> Result<bool> {
-        match result {
-            "success" => {
-                tracing::info!("Login successful for user: {}", username);
-                Ok(true)
-            }
-            error_msg => {
-                tracing::error!("Login failed for user {}: {}", username, error_msg);
-                Ok(false)
-            }
-        }
-    }
-
     /// Get reference to the public key
     pub fn public_key(&self) -> &ArcPublicKey {
         &self.pgp_public_key

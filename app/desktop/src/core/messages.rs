@@ -34,14 +34,17 @@ pub struct MixnetMessage {
 
 impl MixnetMessage {
     /// Create a query message for a given username
-    pub fn query(sender: &str, username: &str) -> Self {
+    ///
+    /// Queries are anonymous — the sender field is always "anonymous"
+    /// so the server cannot link queries to specific users.
+    pub fn query(username: &str) -> Self {
         let payload = serde_json::json!({
             "username": username
         });
         Self {
             message_type: "system".into(),
             action: "query".into(),
-            sender: sender.into(),
+            sender: "anonymous".into(),
             recipient: "server".into(),
             payload,
             signature: "placeholder".into(),
@@ -68,32 +71,14 @@ impl MixnetMessage {
         }
     }
 
-    /// Login an existing username
-    pub fn login(username: &str) -> Self {
+    /// Ping the server to update sender_tag and provide fresh SURBs
+    pub fn ping(username: &str, timestamp: i64, signature: &str) -> Self {
         let payload = serde_json::json!({
-            "username": username
+            "timestamp": timestamp
         });
         Self {
             message_type: "system".into(),
-            action: "login".into(),
-            sender: username.into(),
-            recipient: "server".into(),
-            payload,
-            signature: "placeholder".into(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            server_time: None,
-        }
-    }
-
-    /// Fetch pending messages for offline delivery
-    pub fn fetch_pending(username: &str, timestamp: i64, signature: &str) -> Self {
-        let payload = serde_json::json!({
-            "timestamp": timestamp,
-            "signature": signature
-        });
-        Self {
-            message_type: "message".into(),
-            action: "fetchPending".into(),
+            action: "ping".into(),
             sender: username.into(),
             recipient: "server".into(),
             payload,
@@ -212,7 +197,7 @@ impl MixnetMessage {
             sender: sender.into(),
             recipient: recipient.into(),
             payload,
-            signature: "placeholder".into(),
+            signature: signed_nonce.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             server_time: None,
         }
@@ -455,6 +440,26 @@ impl MixnetMessage {
         }
     }
 
+    /// Create a sealed sender message that hides the sender identity from the relay server
+    ///
+    /// The `sealed_payload_b64` contains the encrypted sender identity, signature,
+    /// and inner MLS payload — only the recipient can decrypt it.
+    pub fn sealed_send(recipient: &str, sealed_payload_b64: &str) -> Self {
+        let payload = serde_json::json!({
+            "sealed_payload": sealed_payload_b64
+        });
+        Self {
+            message_type: "sealed".into(),
+            action: "send".into(),
+            sender: "__sealed__".into(),
+            recipient: recipient.into(),
+            payload,
+            signature: "placeholder".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
+        }
+    }
+
     /// Create MLS encrypted message using unified format
     ///
     /// This version accepts raw bytes for conversation_id and mls_message,
@@ -483,31 +488,7 @@ impl MixnetMessage {
         }
     }
 
-    /// Acknowledge receipt of pending messages.
-    /// Uses local clock as fallback. Prefer `ack_with_server_time` when server time is available.
-    pub fn ack(username: &str, pending_ids: &[String]) -> Self {
-        Self::ack_with_server_time(username, pending_ids, chrono::Utc::now().timestamp())
-    }
 
-    /// Acknowledge receipt of pending messages with a server-relative timestamp.
-    /// The `timestamp` parameter should come from `AppState::get_server_time("discovery")`
-    /// to avoid clock skew issues.
-    pub fn ack_with_server_time(username: &str, pending_ids: &[String], timestamp: i64) -> Self {
-        let payload = serde_json::json!({
-            "pendingIds": pending_ids,
-            "timestamp": timestamp
-        });
-        Self {
-            message_type: "message".into(),
-            action: "ack".into(),
-            sender: username.into(),
-            recipient: "server".into(),
-            payload,
-            signature: "placeholder".into(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            server_time: None,
-        }
-    }
 
     /// Update signature for a message
     pub fn set_signature(&mut self, signature: &str) {
@@ -637,34 +618,7 @@ impl MixnetMessage {
         }
     }
 
-    /// Acknowledge receipt and processing of a P2P Welcome message for DM handshake
-    ///
-    /// Sent by Bob after he processes Alice's Welcome, so Alice can finalize
-    /// by applying her pending commit.
-    pub fn p2p_welcome_ack(
-        sender: &str,
-        recipient: &str,
-        conversation_id: &str,
-        accepted: bool,
-        signature: &str,
-    ) -> Self {
-        let payload = serde_json::json!({
-            "conversationId": conversation_id,
-            "accepted": accepted
-        });
-        Self {
-            message_type: "system".into(),
-            action: "p2pWelcomeAck".into(),
-            sender: sender.into(),
-            recipient: recipient.into(),
-            payload,
-            signature: signature.into(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            server_time: None,
-        }
-    }
-
-    /// Invite a user to a group by sending them a notification
+/// Invite a user to a group by sending them a notification
     ///
     /// This is used to notify a user that they have been invited and should
     /// provide their KeyPackage to join.
@@ -936,6 +890,68 @@ impl MixnetMessage {
             server_time: None,
         }
     }
+
+    // ========== Pre-Published Key Package Methods ==========
+
+    /// Publish a signed key package to the server (authenticated)
+    pub fn publish_key_package(
+        sender: &str,
+        key_package_b64: &str,
+        pgp_signature: &str,
+        pgp_fingerprint: &str,
+    ) -> Self {
+        let payload = serde_json::json!({
+            "keyPackage": key_package_b64,
+            "pgpSignature": pgp_signature,
+            "pgpFingerprint": pgp_fingerprint
+        });
+        Self {
+            message_type: "system".into(),
+            action: "publishKeyPackage".into(),
+            sender: sender.into(),
+            recipient: "server".into(),
+            payload,
+            signature: "placeholder".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
+        }
+    }
+
+    /// Request a PoW challenge for fetching a key package (anonymous)
+    pub fn fetch_key_package_challenge(target_username: &str) -> Self {
+        let payload = serde_json::json!({
+            "username": target_username
+        });
+        Self {
+            message_type: "system".into(),
+            action: "fetchKeyPackageChallenge".into(),
+            sender: "anonymous".into(),
+            recipient: "server".into(),
+            payload,
+            signature: "placeholder".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
+        }
+    }
+
+    /// Fetch a key package after completing PoW (anonymous)
+    pub fn fetch_key_package(target_username: &str, challenge: &str, nonce: &str) -> Self {
+        let payload = serde_json::json!({
+            "username": target_username,
+            "challenge": challenge,
+            "nonce": nonce
+        });
+        Self {
+            message_type: "system".into(),
+            action: "fetchKeyPackage".into(),
+            sender: "anonymous".into(),
+            recipient: "server".into(),
+            payload,
+            signature: "placeholder".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -944,10 +960,10 @@ mod tests {
 
     #[test]
     fn test_query_message() {
-        let msg = MixnetMessage::query("alice", "bob");
+        let msg = MixnetMessage::query("bob");
         assert_eq!(msg.message_type, "system");
         assert_eq!(msg.action, "query");
-        assert_eq!(msg.sender, "alice");
+        assert_eq!(msg.sender, "anonymous");
         assert_eq!(msg.recipient, "server");
         assert_eq!(msg.payload["username"], "bob");
     }
@@ -964,13 +980,14 @@ mod tests {
     }
 
     #[test]
-    fn test_login_message() {
-        let msg = MixnetMessage::login("charlie");
+    fn test_ping_message() {
+        let msg = MixnetMessage::ping("charlie", 1234567890, "test_sig");
         assert_eq!(msg.message_type, "system");
-        assert_eq!(msg.action, "login");
+        assert_eq!(msg.action, "ping");
         assert_eq!(msg.sender, "charlie");
         assert_eq!(msg.recipient, "server");
-        assert_eq!(msg.payload["username"], "charlie");
+        assert_eq!(msg.payload["timestamp"], 1234567890);
+        assert_eq!(msg.signature, "test_sig");
     }
 
     #[test]
@@ -1033,7 +1050,7 @@ mod tests {
 
     #[test]
     fn test_set_signature() {
-        let mut msg = MixnetMessage::query("alice", "bob");
+        let mut msg = MixnetMessage::query("bob");
         assert_eq!(msg.signature, "placeholder");
         msg.set_signature("real_signature");
         assert_eq!(msg.signature, "real_signature");
@@ -1041,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_payload_for_signing() {
-        let msg = MixnetMessage::query("alice", "bob");
+        let msg = MixnetMessage::query("bob");
         let payload_str = msg.payload_for_signing().unwrap();
         assert!(payload_str.contains("\"username\":\"bob\""));
     }

@@ -79,12 +79,17 @@ pub async fn add_contact(
         return Err(ApiError::validation("Cannot add yourself as a contact"));
     }
 
-    // TODO: Integrate with nymstr-app core
-    // - Query discovery server for user's public key
-    // - Verify user exists
+    // Get the user's public key from query cache (populated by query_user)
+    let public_key: String = sqlx::query_scalar(
+        "SELECT public_key FROM query_cache WHERE username = ?"
+    )
+    .bind(&username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+    .unwrap_or_default();
 
     let display_name = display_name.unwrap_or_else(|| username.clone());
-    let mock_public_key = format!("mock_key_{}", username);
 
     // Store in database with owner_username
     sqlx::query(
@@ -93,7 +98,7 @@ pub async fn add_contact(
     .bind(&current_user.username)
     .bind(&username)
     .bind(&display_name)
-    .bind(&mock_public_key)
+    .bind(&public_key)
     .execute(&state.db)
     .await
     .map_err(|e| ApiError::internal(format!("Failed to add contact: {}", e)))?;
@@ -140,8 +145,8 @@ pub async fn query_user(
 ) -> Result<Option<serde_json::Value>, ApiError> {
     tracing::info!("Querying user: {}", username);
 
-    // Get current user and mixnet service
-    let current_user = state.get_current_user().await
+    // Ensure we're connected (mixnet must be up), but don't leak identity in the query
+    let _current_user = state.get_current_user().await
         .ok_or_else(|| ApiError::authentication("Not logged in"))?;
     let mixnet_service = state.get_mixnet_service().await
         .ok_or_else(|| ApiError::not_connected("Mixnet not connected"))?;
@@ -151,7 +156,7 @@ pub async fn query_user(
 
     // Send query request to server
     mixnet_service
-        .send_query_request(&current_user.username, &username)
+        .send_query_request(&username)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to send query: {}", e)))?;
 
@@ -165,6 +170,16 @@ pub async fn query_user(
     match result {
         Ok(Ok(Some(query_result))) => {
             tracing::info!("Query successful for user: {}", username);
+
+            // Cache the public key so add_contact and accept_contact_request can use it
+            let _ = sqlx::query(
+                "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)"
+            )
+            .bind(&query_result.username)
+            .bind(&query_result.public_key)
+            .execute(&state.db)
+            .await;
+
             Ok(Some(serde_json::json!({
                 "username": query_result.username,
                 "publicKey": query_result.public_key

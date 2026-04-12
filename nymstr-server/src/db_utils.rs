@@ -73,6 +73,18 @@ impl DbUtils {
             );
             CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_messages(recipient);
             CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending_messages(expiresAt);
+
+            CREATE TABLE IF NOT EXISTS key_packages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT NOT NULL,
+                key_package_b64 TEXT NOT NULL,
+                pgp_signature   TEXT NOT NULL,
+                pgp_fingerprint TEXT NOT NULL,
+                device_id       TEXT NOT NULL DEFAULT 'primary',
+                created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+                expires_at      INTEGER NOT NULL DEFAULT (unixepoch() + 2592000)
+            );
+            CREATE INDEX IF NOT EXISTS idx_kp_username ON key_packages(username);
             "#,
         )
         .execute(&pool)
@@ -363,6 +375,91 @@ impl DbUtils {
         .await?;
         Ok(row.get(0))
     }
+
+    // ===== KEY PACKAGE OPERATIONS =====
+
+    /// Store a signed key package for a user.
+    pub async fn store_key_package(
+        &self,
+        username: &str,
+        key_package_b64: &str,
+        pgp_signature: &str,
+        pgp_fingerprint: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO key_packages (username, key_package_b64, pgp_signature, pgp_fingerprint) VALUES (?, ?, ?, ?)",
+        )
+        .bind(username)
+        .bind(key_package_b64)
+        .bind(pgp_signature)
+        .bind(pgp_fingerprint)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Consume (fetch and delete) one key package for a user.
+    /// Returns (key_package_b64, pgp_signature, pgp_fingerprint).
+    /// Refuses to consume the last one (holdback).
+    pub async fn consume_key_package(
+        &self,
+        username: &str,
+    ) -> Result<Option<(String, String, String)>> {
+        let count_row = sqlx::query(
+            "SELECT COUNT(*) FROM key_packages WHERE username = ? AND expires_at > unixepoch()",
+        )
+        .bind(username)
+        .fetch_one(&self.pool)
+        .await?;
+        let count: i64 = count_row.get(0);
+
+        if count <= 1 {
+            return Ok(None);
+        }
+
+        let row = sqlx::query(
+            "SELECT id, key_package_b64, pgp_signature, pgp_fingerprint FROM key_packages WHERE username = ? AND expires_at > unixepoch() ORDER BY created_at ASC LIMIT 1",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => {
+                let id: i64 = r.get(0);
+                let kp: String = r.get(1);
+                let sig: String = r.get(2);
+                let fp: String = r.get(3);
+
+                sqlx::query("DELETE FROM key_packages WHERE id = ?")
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await?;
+
+                Ok(Some((kp, sig, fp)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Count unexpired key packages for a user.
+    pub async fn count_key_packages(&self, username: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) FROM key_packages WHERE username = ? AND expires_at > unixepoch()",
+        )
+        .bind(username)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get(0))
+    }
+
+    /// Delete expired key packages. Returns the number of rows deleted.
+    pub async fn cleanup_expired_key_packages(&self) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM key_packages WHERE expires_at < unixepoch()")
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -583,5 +680,117 @@ mod tests {
 
         let result = db.update_user_field(username, "senderTag", "new_tag").await;
         assert!(result.is_ok());
+    }
+
+    // ===== KEY PACKAGE TESTS =====
+
+    #[tokio::test]
+    async fn test_store_and_count_key_packages() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 0);
+
+        db.store_key_package("alice", "kp_data_1", "sig_1", "fp_1")
+            .await
+            .unwrap();
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 1);
+
+        db.store_key_package("alice", "kp_data_2", "sig_2", "fp_2")
+            .await
+            .unwrap();
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 2);
+
+        // Other user's count is independent
+        assert_eq!(db.count_key_packages("bob").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_consume_key_package() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        // Store two key packages
+        db.store_key_package("alice", "kp_data_1", "sig_1", "fp_1")
+            .await
+            .unwrap();
+        db.store_key_package("alice", "kp_data_2", "sig_2", "fp_2")
+            .await
+            .unwrap();
+
+        // Consume returns the oldest one
+        let result = db.consume_key_package("alice").await.unwrap();
+        assert!(result.is_some());
+        let (kp, sig, fp) = result.unwrap();
+        assert_eq!(kp, "kp_data_1");
+        assert_eq!(sig, "sig_1");
+        assert_eq!(fp, "fp_1");
+
+        // Only one left now
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_consume_key_package_holdback() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        // With zero packages, consume returns None
+        let result = db.consume_key_package("alice").await.unwrap();
+        assert!(result.is_none());
+
+        // With exactly one package, consume returns None (holdback)
+        db.store_key_package("alice", "kp_data_1", "sig_1", "fp_1")
+            .await
+            .unwrap();
+        let result = db.consume_key_package("alice").await.unwrap();
+        assert!(result.is_none());
+
+        // The package is still there
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_expired_key_packages() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        // Insert a key package that is already expired
+        sqlx::query(
+            "INSERT INTO key_packages (username, key_package_b64, pgp_signature, pgp_fingerprint, expires_at) VALUES (?, ?, ?, ?, unixepoch() - 1)",
+        )
+        .bind("alice")
+        .bind("expired_kp")
+        .bind("sig")
+        .bind("fp")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // Insert a valid (unexpired) key package
+        db.store_key_package("alice", "valid_kp", "sig2", "fp2")
+            .await
+            .unwrap();
+
+        // Cleanup should remove the expired one
+        let deleted = db.cleanup_expired_key_packages().await.unwrap();
+        assert_eq!(deleted, 1);
+
+        // Only the valid one remains
+        assert_eq!(db.count_key_packages("alice").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_consume_key_package_nonexistent_user() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        let result = db.consume_key_package("nobody").await.unwrap();
+        assert!(result.is_none());
     }
 }

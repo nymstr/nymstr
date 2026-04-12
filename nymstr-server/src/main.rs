@@ -216,12 +216,13 @@ async fn main() -> anyhow::Result<()> {
     let builder = MixnetClientBuilder::new_with_default_storage(storage_paths).await?;
     let client_inner = builder.build()?.connect_to_mixnet().await?;
     let sender = client_inner.split_sender();
+    let surb_storage = client_inner.reply_surb_storage();
     let address = client_inner.nym_address();
     log::info!("Connected to mixnet. Nym Address: {}", address);
 
     let mut client_stream = client_inner;
     let mut message_utils =
-        MessageUtils::new(client_id.clone(), Box::new(NymReplySender::new(sender)), db, crypto);
+        MessageUtils::new(client_id.clone(), Box::new(NymReplySender::new(sender)), db, crypto, Some(surb_storage));
     tokio::select! {
         _ = async {
             while let Some(msg) = client_stream.next().await {
@@ -246,7 +247,7 @@ async fn run_stdio_mode(
 ) -> anyhow::Result<()> {
     log::info!("Starting server in stdio mode");
     let sender = Box::new(StdioReplySender::new());
-    let mut message_utils = MessageUtils::new(client_id, sender, db, crypto);
+    let mut message_utils = MessageUtils::new(client_id, sender, db, crypto, None);
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();

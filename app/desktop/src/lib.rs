@@ -72,7 +72,7 @@ pub fn run() {
             // Auth commands
             commands::initialize,
             commands::register_user,
-            commands::login_user,
+            commands::ping_server,
             commands::logout,
             commands::get_current_user,
             // Connection commands

@@ -54,6 +54,7 @@ impl TestServer {
             Box::new(Arc::clone(&sender)),
             db,
             crypto,
+            None,
         );
 
         TestServer {
@@ -179,21 +180,22 @@ impl TestClient {
             "action": "fetchPending",
             "sender": self.username,
             "payload": {
-                "timestamp": timestamp,
-                "signature": sig
-            }
+                "timestamp": timestamp
+            },
+            "signature": sig
         })
     }
 
     /// Build a unified-format relay message (keyPackageRequest, p2pWelcome, etc.)
     fn relay_msg(&self, action: &str, recipient: &str, payload: Value) -> Value {
+        let sig = self.sign(&serde_json::to_string(&payload).unwrap_or_default());
         json!({
-            "type": "message",
+            "type": "system",
             "action": action,
             "sender": self.username,
             "recipient": recipient,
             "payload": payload,
-            "signature": "placeholder"
+            "signature": sig
         })
     }
 }
@@ -431,15 +433,17 @@ async fn test_duplicate_registration_rejected() {
 // DM Handshake / Invitation Flow Tests
 // ============================================================
 
-/// Full DM initialization handshake:
+/// DM key-package exchange (the cleartext portion of the handshake).
+///
+/// After step 4, Alice creates the MLS group and sends a *sealed* p2pWelcome
+/// (`type: "sealed"`), which the server routes by recipient only. That sealed
+/// path is covered by the normal sealed-send relay; it's not exercised here
+/// because it requires real ECDH/MLS state.
+///
 ///   1. Alice sends keyPackageRequest → relayed to Bob
 ///   2. Bob fetches pending → gets keyPackageRequest
 ///   3. Bob sends keyPackageResponse → relayed to Alice
 ///   4. Alice fetches pending → gets keyPackageResponse
-///   5. Alice sends p2pWelcome (MLS group creation) → relayed to Bob
-///   6. Bob fetches pending → gets p2pWelcome
-///   7. Bob sends p2pWelcomeAck → relayed to Alice
-///   8. Alice fetches pending → gets p2pWelcomeAck → conversation established
 #[tokio::test]
 async fn test_dm_handshake_full_flow() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -506,56 +510,8 @@ async fn test_dm_handshake_full_flow() {
         pending
     );
 
-    // --- Step 5: Alice sends p2pWelcome to Bob ---
-    let welcome_payload = json!({
-        "welcome": "dummy-mls-welcome-base64",
-        "commit": "dummy-mls-commit-base64",
-        "ratchetTree": "dummy-ratchet-tree-base64",
-        "conversationId": "alice-bob-dm-001",
-        "senderPublicKey": alice.public_key,
-    });
-    server
-        .send(
-            &alice.tag,
-            alice.relay_msg("p2pWelcome", "bob", welcome_payload),
-        )
-        .await;
-
-    // --- Step 6: Bob fetches pending → gets p2pWelcome ---
-    let pending = fetch_pending(&mut server, &bob).await;
-    let has_welcome = pending
-        .iter()
-        .any(|m| m["action"].as_str() == Some("p2pWelcome"));
-    assert!(
-        has_welcome,
-        "Bob should have p2pWelcome in pending. Got: {:?}",
-        pending
-    );
-
-    // --- Step 7: Bob sends p2pWelcomeAck to Alice ---
-    let ack_payload = json!({
-        "conversationId": "alice-bob-dm-001",
-        "senderPublicKey": bob.public_key,
-    });
-    server
-        .send(
-            &bob.tag,
-            bob.relay_msg("p2pWelcomeAck", "alice", ack_payload),
-        )
-        .await;
-
-    // --- Step 8: Alice fetches pending → gets p2pWelcomeAck ---
-    let pending = fetch_pending(&mut server, &alice).await;
-    let has_ack = pending
-        .iter()
-        .any(|m| m["action"].as_str() == Some("p2pWelcomeAck"));
-    assert!(
-        has_ack,
-        "Alice should have p2pWelcomeAck in pending. Got: {:?}",
-        pending
-    );
-
-    // Conversation is now established! Both sides have completed the handshake.
+    // After step 4, Alice would send a sealed p2pWelcome; that is covered by
+    // the sealed-send relay path, not exercised here.
 }
 
 /// Test that relay messages to nonexistent users are queued silently
@@ -614,7 +570,7 @@ async fn test_pending_queue_multiple_message_types() {
     server
         .send(
             &alice.tag,
-            alice.relay_msg("p2pWelcome", "bob", json!({"step": 2})),
+            alice.relay_msg("keyPackageResponse", "bob", json!({"step": 2})),
         )
         .await;
 
@@ -630,8 +586,8 @@ async fn test_pending_queue_multiple_message_types() {
         actions
     );
     assert!(
-        actions.contains(&"p2pWelcome"),
-        "Missing p2pWelcome in pending: {:?}",
+        actions.contains(&"keyPackageResponse"),
+        "Missing keyPackageResponse in pending: {:?}",
         actions
     );
 }

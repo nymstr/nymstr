@@ -7,6 +7,7 @@
 //! - Handling MLS key package exchange
 
 use chrono::Utc;
+use sha2::Digest;
 use tauri::State;
 use uuid::Uuid;
 
@@ -14,6 +15,43 @@ use crate::core::db::Db;
 use crate::core::message_handler::{DirectMessageHandler, normalize_conversation_id};
 use crate::state::AppState;
 use crate::types::{ApiError, MessageDTO, MessageStatus};
+
+/// Check whether `hash` has at least `bits` leading zero bits.
+fn has_leading_zero_bits(hash: &[u8], bits: u32) -> bool {
+    let full_bytes = (bits / 8) as usize;
+    let remaining_bits = bits % 8;
+    if hash.len() < full_bytes + if remaining_bits > 0 { 1 } else { 0 } {
+        return false;
+    }
+    for &b in &hash[..full_bytes] {
+        if b != 0 {
+            return false;
+        }
+    }
+    if remaining_bits > 0 {
+        let mask = 0xFF << (8 - remaining_bits);
+        if hash[full_bytes] & mask != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Extract the peer username from a conversation ID like "dm:user1:user2"
+fn extract_peer_username(conversation_id: &str, current_user: &str) -> Option<String> {
+    let parts: Vec<&str> = conversation_id.split(':').collect();
+    if parts.len() == 3 && parts[0] == "dm" {
+        if parts[1] == current_user {
+            Some(parts[2].to_string())
+        } else if parts[2] == current_user {
+            Some(parts[1].to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
 
 /// Send a direct message to a contact with MLS encryption
 #[tauri::command]
@@ -57,6 +95,11 @@ pub async fn send_message(
         .await
         .ok_or_else(|| ApiError::internal("PGP keys not available".to_string()))?;
 
+    // Extract peer username — recipient may be a conversation ID (dm:user1:user2) or a raw username
+    let peer_username = extract_peer_username(&recipient, &current_user.username)
+        .unwrap_or_else(|| recipient.clone());
+    let conversation_id = normalize_conversation_id(&current_user.username, &peer_username);
+
     // Create message DTO first (for storage)
     let message = MessageDTO {
         id: Uuid::new_v4().to_string(),
@@ -67,9 +110,6 @@ pub async fn send_message(
         is_own: true,
         is_read: true,
     };
-
-    // Store message locally with pending status
-    let conversation_id = normalize_conversation_id(&current_user.username, &recipient);
     sqlx::query(
         r#"
         INSERT INTO messages (id, conversation_id, sender, content, timestamp, status, is_own, is_read)
@@ -88,34 +128,166 @@ pub async fn send_message(
     .await
     .map_err(|e| ApiError::internal(format!("Failed to store message: {}", e)))?;
 
-    // Create direct message handler
+    // Create direct message handler (clone Arcs first for potential background use)
     let dm_handler = DirectMessageHandler::new(
-        mls_client,
-        mixnet_service,
-        secret_key,
-        passphrase,
+        mls_client.clone(),
+        mixnet_service.clone(),
+        secret_key.clone(),
+        passphrase.clone(),
         current_user.username.clone(),
         state.db.clone(),
     );
 
     // Check if MLS conversation exists
-    if !dm_handler.conversation_exists(&recipient).await {
-        tracing::info!("No MLS conversation with {}, initiating key package exchange", recipient);
+    if !dm_handler.conversation_exists(&peer_username).await {
+        if dm_handler.handshake_in_progress(&peer_username).await {
+            // Handshake already in progress — just queue the message as pending
+            tracing::info!("Handshake in progress with {}, message queued", peer_username);
+            return Ok(MessageDTO {
+                status: MessageStatus::Pending,
+                ..message
+            });
+        }
 
-        // Initiate key package request for handshake
-        dm_handler.request_key_package(&recipient).await
-            .map_err(|e| ApiError::internal(format!("Failed to request key package: {}", e)))?;
+        tracing::info!("No MLS conversation with {}, initiating via pre-published key package", peer_username);
 
-        // Update message status to pending (waiting for handshake)
-        sqlx::query("UPDATE messages SET status = 'pending' WHERE id = ?")
-            .bind(&message.id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| ApiError::internal(format!("Failed to update message status: {}", e)))?;
+        // Store pending outreach so the message loop can drain it after handshake
+        sqlx::query(
+            "INSERT OR IGNORE INTO pending_outreach (recipient, message_draft) VALUES (?, ?)"
+        )
+        .bind(&peer_username)
+        .bind(&content)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to store pending outreach: {}", e)))?;
 
-        tracing::info!("Key package request sent, message queued pending handshake");
+        // Build a fresh handler with cloned Arcs for the background initiation
+        let bg_mls = mls_client;
+        let bg_mixnet = mixnet_service;
+        let bg_sk = secret_key;
+        let bg_pp = passphrase;
+        let bg_user = current_user.username.clone();
+        let bg_peer = peer_username.clone();
+        let bg_db = state.db.clone();
+        let bg_state = state.inner().clone();
 
-        // Return message with pending status
+        tokio::spawn(async move {
+            let bg_handler = DirectMessageHandler::new(
+                bg_mls, bg_mixnet.clone(), bg_sk.clone(), bg_pp.clone(), bg_user.clone(), bg_db.clone(),
+            );
+
+            // Step 1: fetch challenge
+            let challenge_rx = bg_state.register_pending_query(&format!("kp_challenge:{}", bg_peer)).await;
+            if let Err(e) = bg_mixnet.send_fetch_key_package_challenge(&bg_peer).await {
+                tracing::error!("Failed to request KP challenge for {}: {}", bg_peer, e);
+                return;
+            }
+
+            let challenge_data = match tokio::time::timeout(std::time::Duration::from_secs(15), challenge_rx).await {
+                Ok(Ok(Some(qr))) => qr,
+                _ => {
+                    bg_state.cancel_pending_query(&format!("kp_challenge:{}", bg_peer)).await;
+                    tracing::error!("KP challenge timed out for {}", bg_peer);
+                    return;
+                }
+            };
+
+            let challenge = challenge_data.public_key.clone();
+            let difficulty: u32 = challenge_data.username.parse().unwrap_or(16);
+
+            // Step 2: grind PoW — hash SHA256(username || challenge || nonce) with
+            // incremental nonce. Pre-compute the fixed prefix to avoid re-hashing it.
+            let peer_c = bg_peer.clone();
+            let chal_c = challenge.clone();
+            let nonce = match tokio::task::spawn_blocking(move || {
+                use sha2::Digest;
+                use std::io::Write;
+                // Pre-compute hash state for the fixed prefix (username + challenge)
+                let mut prefix_hasher = sha2::Sha256::new();
+                prefix_hasher.update(peer_c.as_bytes());
+                prefix_hasher.update(chal_c.as_bytes());
+
+                let mut nonce_buf = Vec::with_capacity(20);
+                let mut n: u64 = 0;
+                loop {
+                    nonce_buf.clear();
+                    write!(&mut nonce_buf, "{}", n).unwrap();
+                    let mut hasher = prefix_hasher.clone();
+                    hasher.update(&nonce_buf);
+                    let hash = hasher.finalize();
+                    if has_leading_zero_bits(&hash, difficulty) {
+                        return n.to_string();
+                    }
+                    n += 1;
+                }
+            }).await {
+                Ok(n) => n,
+                Err(e) => { tracing::error!("PoW task failed for {}: {}", bg_peer, e); return; }
+            };
+
+            // Step 3: fetch key package
+            let kp_rx = bg_state.register_pending_query(&format!("kp_fetch:{}", bg_peer)).await;
+            if let Err(e) = bg_mixnet.send_fetch_key_package(&bg_peer, &challenge, &nonce).await {
+                tracing::error!("Failed to fetch KP for {}: {}", bg_peer, e);
+                return;
+            }
+
+            let kp_data = match tokio::time::timeout(std::time::Duration::from_secs(15), kp_rx).await {
+                Ok(Ok(Some(qr))) => qr,
+                _ => {
+                    bg_state.cancel_pending_query(&format!("kp_fetch:{}", bg_peer)).await;
+                    tracing::error!("KP fetch timed out for {}", bg_peer);
+                    return;
+                }
+            };
+
+            let recipient_pk_armored = kp_data.public_key.clone();
+            let bundle_json = kp_data.username.clone();
+
+            let bundle: nymstr_crypto::mls::SignedKeyPackageBundle = match serde_json::from_str(&bundle_json) {
+                Ok(b) => b,
+                Err(e) => { tracing::error!("Failed to parse KP bundle for {}: {}", bg_peer, e); return; }
+            };
+
+            // Verify bundle
+            let recipient_pgp = match crate::crypto::pgp::PgpKeyManager::parse_public_key(&recipient_pk_armored) {
+                Ok(k) => k,
+                Err(e) => { tracing::error!("Failed to parse PGP key for {}: {}", bg_peer, e); return; }
+            };
+            match nymstr_crypto::mls::verify_bundle(&bundle, &recipient_pgp) {
+                Ok(true) => {}
+                Ok(false) => { tracing::error!("KP bundle verification failed for {}", bg_peer); return; }
+                Err(e) => { tracing::error!("KP bundle verify error for {}: {}", bg_peer, e); return; }
+            }
+
+            // Store contact
+            let _ = sqlx::query(
+                "INSERT OR REPLACE INTO contacts (owner_username, username, display_name, public_key) VALUES (?, ?, ?, ?)"
+            )
+            .bind(&bg_user)
+            .bind(&bg_peer)
+            .bind(&bg_peer)
+            .bind(&recipient_pk_armored)
+            .execute(&bg_db)
+            .await;
+
+            // Complete handshake
+            if let Err(e) = bg_handler.complete_handshake(&bg_peer, &bundle.key_package_b64).await {
+                tracing::error!("Failed to complete handshake with {}: {}", bg_peer, e);
+                return;
+            }
+
+            // Clean up pending outreach
+            let _ = sqlx::query("DELETE FROM pending_outreach WHERE recipient = ?")
+                .bind(&bg_peer)
+                .execute(&bg_db)
+                .await;
+
+            tracing::info!("Background conversation initiation completed for {}", bg_peer);
+        });
+
+        tracing::info!("Conversation initiation spawned in background, message queued pending handshake");
+
         return Ok(MessageDTO {
             status: MessageStatus::Pending,
             ..message
@@ -123,7 +295,7 @@ pub async fn send_message(
     }
 
     // Send the encrypted message
-    match dm_handler.send_message(&recipient, &content).await {
+    match dm_handler.send_message(&peer_username, &content).await {
         Ok(_) => {
             // Update message status to sent
             sqlx::query("UPDATE messages SET status = 'sent' WHERE id = ?")
@@ -132,7 +304,7 @@ pub async fn send_message(
                 .await
                 .map_err(|e| ApiError::internal(format!("Failed to update message status: {}", e)))?;
 
-            tracing::info!("Message sent: {} -> {}", current_user.username, recipient);
+            tracing::info!("Message sent: {} -> {}", current_user.username, peer_username);
 
             Ok(MessageDTO {
                 status: MessageStatus::Sent,
@@ -153,8 +325,17 @@ pub async fn send_message(
     }
 }
 
-/// Initiate MLS handshake with a contact
-/// Call this before sending the first message to a new contact
+/// Initiate MLS handshake with a contact using pre-published key packages.
+///
+/// Flow:
+/// 1. Send anonymous `fetchKeyPackageChallenge` to get a PoW challenge
+/// 2. Grind the PoW nonce
+/// 3. Send `fetchKeyPackage` with the solution
+/// 4. Receive the signed key package bundle
+/// 5. Verify the PGP signature on the bundle
+/// 6. Store recipient's public key in contacts
+/// 7. Create MLS group and send p2pWelcome via sealed sender
+/// 8. Store pending handshake, return success
 #[tauri::command]
 pub async fn initiate_conversation(
     recipient: String,
@@ -186,10 +367,10 @@ pub async fn initiate_conversation(
 
     // Create handler
     let dm_handler = DirectMessageHandler::new(
-        mls_client,
-        mixnet_service,
-        secret_key,
-        passphrase,
+        mls_client.clone(),
+        mixnet_service.clone(),
+        secret_key.clone(),
+        passphrase.clone(),
         current_user.username.clone(),
         state.db.clone(),
     );
@@ -200,11 +381,135 @@ pub async fn initiate_conversation(
         return Ok(true);
     }
 
-    // Send key package request
-    dm_handler.request_key_package(&recipient).await
-        .map_err(|e| ApiError::internal(format!("Failed to request key package: {}", e)))?;
+    // Check if handshake is already in progress
+    if dm_handler.handshake_in_progress(&recipient).await {
+        tracing::info!("Handshake already in progress with {}", recipient);
+        return Ok(false);
+    }
 
-    tracing::info!("Key package request sent to {}", recipient);
+    // --- Step 1: Request PoW challenge ---
+    let challenge_rx = state.register_pending_query(&format!("kp_challenge:{}", recipient)).await;
+
+    mixnet_service
+        .send_fetch_key_package_challenge(&recipient)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to request KP challenge: {}", e)))?;
+
+    // Wait for challenge response (15s timeout)
+    let challenge_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        challenge_rx,
+    )
+    .await;
+
+    let challenge_data = match challenge_result {
+        Ok(Ok(Some(qr))) => qr,
+        Ok(Ok(None)) => {
+            return Err(ApiError::internal("Key package challenge returned empty".to_string()));
+        }
+        Ok(Err(_)) => {
+            state.cancel_pending_query(&format!("kp_challenge:{}", recipient)).await;
+            return Err(ApiError::internal("Key package challenge canceled".to_string()));
+        }
+        Err(_) => {
+            state.cancel_pending_query(&format!("kp_challenge:{}", recipient)).await;
+            return Err(ApiError::timeout("Key package challenge timed out"));
+        }
+    };
+
+    // challenge_data.public_key carries the challenge string, username carries difficulty
+    let challenge = challenge_data.public_key.clone();
+    let difficulty: u32 = challenge_data.username.parse().unwrap_or(16);
+
+    tracing::info!("Received KP challenge for {}, difficulty={}", recipient, difficulty);
+
+    // --- Step 2: Grind PoW nonce ---
+    let recipient_clone = recipient.clone();
+    let challenge_clone = challenge.clone();
+    let nonce = tokio::task::spawn_blocking(move || {
+        let mut nonce: u64 = 0;
+        loop {
+            let input = format!("{}{}{}", recipient_clone, challenge_clone, nonce);
+            let hash = sha2::Sha256::digest(input.as_bytes());
+            if has_leading_zero_bits(&hash, difficulty) {
+                return nonce.to_string();
+            }
+            nonce += 1;
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("PoW task failed: {}", e)))?;
+
+    tracing::info!("PoW solved for {}, nonce={}", recipient, nonce);
+
+    // --- Step 3: Fetch key package with PoW solution ---
+    let kp_rx = state.register_pending_query(&format!("kp_fetch:{}", recipient)).await;
+
+    mixnet_service
+        .send_fetch_key_package(&recipient, &challenge, &nonce)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to fetch key package: {}", e)))?;
+
+    // Wait for KP bundle response (15s timeout)
+    let kp_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        kp_rx,
+    )
+    .await;
+
+    let kp_data = match kp_result {
+        Ok(Ok(Some(qr))) => qr,
+        Ok(Ok(None)) => {
+            return Err(ApiError::internal("Key package not found for recipient".to_string()));
+        }
+        Ok(Err(_)) => {
+            state.cancel_pending_query(&format!("kp_fetch:{}", recipient)).await;
+            return Err(ApiError::internal("Key package fetch canceled".to_string()));
+        }
+        Err(_) => {
+            state.cancel_pending_query(&format!("kp_fetch:{}", recipient)).await;
+            return Err(ApiError::timeout("Key package fetch timed out"));
+        }
+    };
+
+    // kp_data.public_key = recipient's PGP public key (armored)
+    // kp_data.username = JSON-encoded SignedKeyPackageBundle
+    let recipient_public_key_armored = kp_data.public_key.clone();
+    let bundle_json = kp_data.username.clone();
+
+    let bundle: nymstr_crypto::mls::SignedKeyPackageBundle = serde_json::from_str(&bundle_json)
+        .map_err(|e| ApiError::internal(format!("Failed to parse KP bundle: {}", e)))?;
+
+    // --- Step 5: Verify PGP signature on the bundle ---
+    let recipient_pgp_pubkey = crate::crypto::pgp::PgpKeyManager::parse_public_key(&recipient_public_key_armored)
+        .map_err(|e| ApiError::internal(format!("Failed to parse recipient PGP key: {}", e)))?;
+
+    let verified = nymstr_crypto::mls::verify_bundle(&bundle, &recipient_pgp_pubkey)
+        .map_err(|e| ApiError::internal(format!("Failed to verify KP bundle: {}", e)))?;
+
+    if !verified {
+        return Err(ApiError::internal("Key package bundle signature verification failed".to_string()));
+    }
+
+    tracing::info!("Key package bundle verified for {}", recipient);
+
+    // --- Step 6: Store recipient's public key in contacts ---
+    sqlx::query(
+        "INSERT OR REPLACE INTO contacts (owner_username, username, display_name, public_key) VALUES (?, ?, ?, ?)"
+    )
+    .bind(&current_user.username)
+    .bind(&recipient)
+    .bind(&recipient)
+    .bind(&recipient_public_key_armored)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to store contact: {}", e)))?;
+
+    // --- Step 7: Create MLS group and send p2pWelcome ---
+    dm_handler.complete_handshake(&recipient, &bundle.key_package_b64).await
+        .map_err(|e| ApiError::internal(format!("Failed to complete handshake: {}", e)))?;
+
+    tracing::info!("MLS handshake initiated with {} via pre-published key package", recipient);
     Ok(false)
 }
 

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
 
 /// Incoming envelope from mixnet (server or peer)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Incoming {
     /// Decoded mixnet envelope
     pub envelope: MixnetMessage,
@@ -282,38 +282,27 @@ impl MixnetService {
         self.send_to_server(&env).await
     }
 
-    /// Send a login request for a username
-    pub async fn send_login_request(&self, username: &str) -> Result<()> {
-        let env = MixnetMessage::login(username);
-        self.send_to_server(&env).await
-    }
-
-    /// Send login challenge response
-    pub async fn send_login_response(&self, username: &str, signature: &str) -> Result<()> {
-        let env = MixnetMessage::challenge_response(username, "server", signature, "login");
-        self.send_to_server(&env).await
+    /// Send a ping to the server to update sender_tag and provide fresh SURBs.
+    ///
+    /// Sends with 200 SURBs to fill the server's SURB pool for this client.
+    pub async fn send_ping(&self, username: &str, timestamp: i64, signature: &str) -> Result<()> {
+        let env = MixnetMessage::ping(username, timestamp, signature);
+        let server_addr = self.server_address.read().await
+            .clone()
+            .context("Server address not configured")?;
+        let recipient: Recipient = server_addr.parse()?;
+        let raw_bytes = serde_json::to_vec(&env)?;
+        self.sender
+            .send_message(recipient, raw_bytes, IncludedSurbs::Amount(200))
+            .await?;
+        Ok(())
     }
 
     // ========== Query Methods ==========
 
     /// Send a query request for a user's public key
-    pub async fn send_query_request(&self, sender: &str, username: &str) -> Result<()> {
-        let env = MixnetMessage::query(sender, username);
-        self.send_to_server(&env).await
-    }
-
-    /// Send a fetch pending messages request
-    pub async fn send_fetch_pending(&self, username: &str, timestamp: i64, signature: &str) -> Result<()> {
-        let env = MixnetMessage::fetch_pending(username, timestamp, signature);
-        self.send_to_server(&env).await
-    }
-
-    /// Acknowledge receipt of pending messages so the server can delete them
-    ///
-    /// The server requires a PGP signature over "ack:{username}:{timestamp}:{pendingIds_comma_joined}"
-    /// where timestamp is a unix epoch integer and pendingIds are comma-joined UUID strings.
-    pub async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()> {
-        let env = MixnetMessage::ack(username, pending_ids);
+    pub async fn send_query_request(&self, username: &str) -> Result<()> {
+        let env = MixnetMessage::query(username);
         self.send_to_server(&env).await
     }
 
@@ -376,6 +365,15 @@ impl MixnetService {
         Ok(())
     }
 
+    /// Send a sealed sender message (sender identity hidden from relay)
+    pub async fn send_sealed_message(&self, recipient: &str, sealed_payload_b64: &str) -> Result<()> {
+        let env = MixnetMessage::sealed_send(recipient, sealed_payload_b64);
+        log::info!("Sending sealed message via server");
+        self.send_to_server(&env).await?;
+        log::info!("Sealed message sent to server successfully");
+        Ok(())
+    }
+
     // ========== MLS Key Exchange Methods ==========
 
     /// Send key package request for MLS handshake
@@ -414,70 +412,7 @@ impl MixnetService {
         Ok(())
     }
 
-    /// Send P2P MLS welcome message for direct messaging handshake
-    ///
-    /// This is used for establishing 1:1 encrypted conversations. The welcome
-    /// is relayed through the discovery server since users haven't exchanged
-    /// direct addresses yet. Includes the commit message and ratchet tree
-    /// alongside the welcome per RFC 9420.
-    pub async fn send_p2p_welcome(
-        &self,
-        sender: &str,
-        recipient: &str,
-        welcome_b64: &str,
-        group_id: &str,
-        commit_b64: Option<&str>,
-        ratchet_tree_b64: Option<&str>,
-        signature: &str,
-    ) -> Result<()> {
-        let mut inner_payload = serde_json::json!({
-            "welcomeMessage": welcome_b64,
-            "groupId": group_id
-        });
-        if let Some(commit) = commit_b64 {
-            inner_payload["commitMessage"] = serde_json::json!(commit);
-        }
-        if let Some(rt) = ratchet_tree_b64 {
-            inner_payload["ratchetTree"] = serde_json::json!(rt);
-        }
-        let payload = serde_json::json!({
-            "type": "system",
-            "action": "p2pWelcome",
-            "sender": sender,
-            "recipient": recipient,
-            "payload": inner_payload,
-            "signature": signature,
-            "timestamp": chrono::Utc::now().to_rfc3339()
-        });
-        log::info!("Sending P2P welcome to {} via discovery server", recipient);
-        let server_addr = self.server_address.read().await
-            .clone()
-            .context("Server address not configured")?;
-        self.send_raw(&server_addr, payload.to_string().into_bytes()).await?;
-        log::info!("P2P welcome sent successfully");
-        Ok(())
-    }
-
-    /// Send P2P welcome acknowledgment for DM handshake finalization
-    ///
-    /// Sent by the Welcome recipient back to the initiator so the initiator
-    /// can apply their pending commit and finalize the conversation.
-    pub async fn send_p2p_welcome_ack(
-        &self,
-        sender: &str,
-        recipient: &str,
-        conversation_id: &str,
-        accepted: bool,
-        signature: &str,
-    ) -> Result<()> {
-        let env = MixnetMessage::p2p_welcome_ack(sender, recipient, conversation_id, accepted, signature);
-        log::info!("Sending P2P welcome ack to {} via server", recipient);
-        self.send_to_server(&env).await?;
-        log::info!("P2P welcome ack sent successfully");
-        Ok(())
-    }
-
-    /// Send group join response for MLS handshake
+/// Send group join response for MLS handshake
     pub async fn send_group_join_response(
         &self,
         sender: &str,
@@ -833,6 +768,51 @@ impl MixnetService {
         log::info!("Query pending users request sent");
         Ok(())
     }
+
+    // ========== Pre-Published Key Package Methods ==========
+
+    /// Publish a signed key package to the server (authenticated)
+    pub async fn send_publish_key_package(
+        &self,
+        sender: &str,
+        key_package_b64: &str,
+        pgp_signature: &str,
+        pgp_fingerprint: &str,
+        signature: &str,
+    ) -> Result<()> {
+        let mut env = MixnetMessage::publish_key_package(sender, key_package_b64, pgp_signature, pgp_fingerprint);
+        env.set_signature(signature);
+        log::info!("Publishing key package for {} to server", sender);
+        self.send_to_server(&env).await?;
+        log::info!("Key package published successfully");
+        Ok(())
+    }
+
+    /// Request a PoW challenge for fetching a key package (anonymous)
+    pub async fn send_fetch_key_package_challenge(
+        &self,
+        target_username: &str,
+    ) -> Result<()> {
+        let env = MixnetMessage::fetch_key_package_challenge(target_username);
+        log::info!("Requesting key package challenge for {}", target_username);
+        self.send_to_server(&env).await?;
+        log::info!("Key package challenge request sent");
+        Ok(())
+    }
+
+    /// Fetch a key package after completing PoW (anonymous)
+    pub async fn send_fetch_key_package(
+        &self,
+        target_username: &str,
+        challenge: &str,
+        nonce: &str,
+    ) -> Result<()> {
+        let env = MixnetMessage::fetch_key_package(target_username, challenge, nonce);
+        log::info!("Fetching key package for {} with PoW solution", target_username);
+        self.send_to_server(&env).await?;
+        log::info!("Key package fetch request sent");
+        Ok(())
+    }
 }
 
 // Allow cloning service for spawn
@@ -875,29 +855,12 @@ impl MixnetSender for MixnetService {
         MixnetService::send_registration_response(self, username, signature).await
     }
 
-    async fn send_login_request(&self, username: &str) -> Result<()> {
-        MixnetService::send_login_request(self, username).await
+    async fn send_ping(&self, username: &str, timestamp: i64, signature: &str) -> Result<()> {
+        MixnetService::send_ping(self, username, timestamp, signature).await
     }
 
-    async fn send_login_response(&self, username: &str, signature: &str) -> Result<()> {
-        MixnetService::send_login_response(self, username, signature).await
-    }
-
-    async fn send_query_request(&self, sender: &str, username: &str) -> Result<()> {
-        MixnetService::send_query_request(self, sender, username).await
-    }
-
-    async fn send_fetch_pending(
-        &self,
-        username: &str,
-        timestamp: i64,
-        signature: &str,
-    ) -> Result<()> {
-        MixnetService::send_fetch_pending(self, username, timestamp, signature).await
-    }
-
-    async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()> {
-        MixnetService::send_ack(self, username, pending_ids).await
+    async fn send_query_request(&self, username: &str) -> Result<()> {
+        MixnetService::send_query_request(self, username).await
     }
 
     async fn send_message_via_server(
@@ -932,6 +895,14 @@ impl MixnetSender for MixnetService {
         MixnetService::send_mls_message(self, sender, recipient, conversation_id, mls_message, signature).await
     }
 
+    async fn send_sealed_message(
+        &self,
+        recipient: &str,
+        sealed_payload_b64: &str,
+    ) -> Result<()> {
+        MixnetService::send_sealed_message(self, recipient, sealed_payload_b64).await
+    }
+
     async fn send_key_package_request(
         &self,
         sender: &str,
@@ -959,31 +930,7 @@ impl MixnetSender for MixnetService {
         ).await
     }
 
-    async fn send_p2p_welcome(
-        &self,
-        sender: &str,
-        recipient: &str,
-        welcome_b64: &str,
-        group_id: &str,
-        commit_b64: Option<&str>,
-        ratchet_tree_b64: Option<&str>,
-        signature: &str,
-    ) -> Result<()> {
-        MixnetService::send_p2p_welcome(self, sender, recipient, welcome_b64, group_id, commit_b64, ratchet_tree_b64, signature).await
-    }
-
-    async fn send_p2p_welcome_ack(
-        &self,
-        sender: &str,
-        recipient: &str,
-        conversation_id: &str,
-        accepted: bool,
-        signature: &str,
-    ) -> Result<()> {
-        MixnetService::send_p2p_welcome_ack(self, sender, recipient, conversation_id, accepted, signature).await
-    }
-
-    async fn send_group_join_response(
+async fn send_group_join_response(
         &self,
         sender: &str,
         recipient: &str,
@@ -1228,6 +1175,33 @@ impl MixnetSender for MixnetService {
     ) -> Result<()> {
         MixnetService::query_pending_users(self, admin, signature, group_server_address).await
     }
+
+    async fn send_publish_key_package(
+        &self,
+        sender: &str,
+        key_package_b64: &str,
+        pgp_signature: &str,
+        pgp_fingerprint: &str,
+        signature: &str,
+    ) -> Result<()> {
+        MixnetService::send_publish_key_package(self, sender, key_package_b64, pgp_signature, pgp_fingerprint, signature).await
+    }
+
+    async fn send_fetch_key_package_challenge(
+        &self,
+        target_username: &str,
+    ) -> Result<()> {
+        MixnetService::send_fetch_key_package_challenge(self, target_username).await
+    }
+
+    async fn send_fetch_key_package(
+        &self,
+        target_username: &str,
+        challenge: &str,
+        nonce: &str,
+    ) -> Result<()> {
+        MixnetService::send_fetch_key_package(self, target_username, challenge, nonce).await
+    }
 }
 
 #[async_trait]
@@ -1259,14 +1233,14 @@ mod tests {
 
     #[test]
     fn test_incoming_struct_creation() {
-        let msg = MixnetMessage::query("alice", "bob");
+        let msg = MixnetMessage::query("bob");
         let incoming = Incoming {
             envelope: msg,
             ts: Utc::now(),
         };
 
         assert_eq!(incoming.envelope.action, "query");
-        assert_eq!(incoming.envelope.sender, "alice");
+        assert_eq!(incoming.envelope.sender, "anonymous");
     }
 
     #[test]

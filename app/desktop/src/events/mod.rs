@@ -163,6 +163,7 @@ pub enum AppEvent {
 }
 
 /// Event emitter helper
+#[derive(Clone)]
 pub struct EventEmitter {
     app_handle: AppHandle,
 }

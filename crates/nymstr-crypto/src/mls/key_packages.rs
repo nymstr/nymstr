@@ -5,11 +5,16 @@
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use mls_rs::CipherSuite;
+use pgp::composed::{SignedPublicKey, SignedSecretKey};
+use pgp::types::KeyDetails;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::client::MlsClient;
 use super::types::{CredentialValidationResult, MlsCredential};
+use crate::keypair::SecurePassphrase;
+use crate::signing::PgpSigner;
 
 /// Supported cipher suites for key packages
 const SUPPORTED_CIPHER_SUITES: &[CipherSuite] = &[
@@ -371,5 +376,180 @@ impl KeyPackageValidationResult {
         } else {
             format!("Invalid key package: {}", self.errors.join(", "))
         }
+    }
+}
+
+/// A key package bundle signed with the user's PGP key.
+/// Published to the server and fetched by other users to initiate conversations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedKeyPackageBundle {
+    /// Base64-encoded MLS key package bytes
+    pub key_package_b64: String,
+    /// PGP detached signature over the raw key package bytes
+    pub pgp_signature: String,
+    /// Hex fingerprint of the signing PGP key
+    pub pgp_fingerprint: String,
+}
+
+/// Generate an MLS key package and sign it with the user's PGP key.
+///
+/// The resulting bundle can be published to the server and verified by other
+/// users, preventing the server from substituting its own key package (MITM).
+pub fn generate_signed_bundle(
+    mls_client: &MlsClient,
+    pgp_secret_key: &SignedSecretKey,
+    passphrase: &SecurePassphrase,
+) -> Result<SignedKeyPackageBundle> {
+    let raw_bytes = mls_client.generate_key_package()?;
+    let key_package_b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+    let pgp_signature = PgpSigner::sign_detached(pgp_secret_key, &raw_bytes, passphrase)?;
+    let fingerprint = pgp_secret_key.fingerprint();
+    let pgp_fingerprint = hex::encode(fingerprint.as_bytes());
+
+    Ok(SignedKeyPackageBundle {
+        key_package_b64,
+        pgp_signature,
+        pgp_fingerprint,
+    })
+}
+
+/// Verify a key package bundle's PGP signature.
+///
+/// Checks that:
+/// 1. The PGP signature over the raw key package bytes is valid
+/// 2. The fingerprint in the bundle matches the provided public key
+pub fn verify_bundle(
+    bundle: &SignedKeyPackageBundle,
+    pgp_public_key: &SignedPublicKey,
+) -> Result<bool> {
+    // Check fingerprint matches
+    let expected_fingerprint = hex::encode(pgp_public_key.fingerprint().as_bytes());
+    if bundle.pgp_fingerprint != expected_fingerprint {
+        log::warn!(
+            "Key package bundle fingerprint mismatch: expected {}, got {}",
+            expected_fingerprint,
+            bundle.pgp_fingerprint
+        );
+        return Ok(false);
+    }
+
+    // Decode the key package bytes
+    let raw_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&bundle.key_package_b64)
+        .map_err(|e| anyhow!("Invalid base64 in key package bundle: {}", e))?;
+
+    // Verify the PGP signature
+    let result = PgpSigner::verify_any_format(pgp_public_key, &raw_bytes, &bundle.pgp_signature)?;
+    Ok(result.is_valid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keypair::PgpKeyManager;
+    use std::sync::Arc;
+
+    /// Helper to create an MlsClient for testing.
+    /// Returns the client and the temp dir (must be kept alive).
+    fn create_test_mls_client(
+        username: &str,
+        pgp_secret_key: &pgp::composed::SignedSecretKey,
+        pgp_public_key: &pgp::composed::SignedPublicKey,
+        passphrase: &SecurePassphrase,
+    ) -> (MlsClient, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client = MlsClient::new(
+            username,
+            Arc::new(pgp_secret_key.clone()),
+            Arc::new(pgp_public_key.clone()),
+            passphrase,
+            temp_dir.path().to_path_buf(),
+        )
+        .unwrap();
+        (client, temp_dir)
+    }
+
+    #[test]
+    fn test_generate_and_verify_signed_bundle() {
+        let passphrase = SecurePassphrase::new("test-passphrase".into());
+        let (secret_key, public_key) =
+            PgpKeyManager::generate_keypair("alice", &passphrase).unwrap();
+
+        let (mls_client, _dir) =
+            create_test_mls_client("alice", &secret_key, &public_key, &passphrase);
+
+        let bundle = generate_signed_bundle(&mls_client, &secret_key, &passphrase).unwrap();
+
+        // Bundle should have non-empty fields
+        assert!(!bundle.key_package_b64.is_empty());
+        assert!(!bundle.pgp_signature.is_empty());
+        assert!(!bundle.pgp_fingerprint.is_empty());
+
+        // Verification should succeed with the correct public key
+        let verified = verify_bundle(&bundle, &public_key).unwrap();
+        assert!(verified, "Bundle verification should succeed with correct key");
+    }
+
+    #[test]
+    fn test_verify_bundle_wrong_key_fails() {
+        let passphrase = SecurePassphrase::new("test-passphrase".into());
+        let (alice_secret, alice_public) =
+            PgpKeyManager::generate_keypair("alice", &passphrase).unwrap();
+        let (_, bob_public) = PgpKeyManager::generate_keypair("bob", &passphrase).unwrap();
+
+        let (mls_client, _dir) =
+            create_test_mls_client("alice", &alice_secret, &alice_public, &passphrase);
+
+        let bundle = generate_signed_bundle(&mls_client, &alice_secret, &passphrase).unwrap();
+
+        // Verification should fail with a different public key
+        let verified = verify_bundle(&bundle, &bob_public).unwrap();
+        assert!(
+            !verified,
+            "Bundle verification should fail with wrong key"
+        );
+    }
+
+    #[test]
+    fn test_verify_bundle_tampered_data_fails() {
+        let passphrase = SecurePassphrase::new("test-passphrase".into());
+        let (secret_key, public_key) =
+            PgpKeyManager::generate_keypair("alice", &passphrase).unwrap();
+
+        let (mls_client, _dir) =
+            create_test_mls_client("alice", &secret_key, &public_key, &passphrase);
+
+        let mut bundle = generate_signed_bundle(&mls_client, &secret_key, &passphrase).unwrap();
+
+        // Tamper with the key package data
+        bundle.key_package_b64 =
+            base64::engine::general_purpose::STANDARD.encode(b"tampered data");
+
+        // Verification should fail because signature doesn't match tampered data
+        let verified = verify_bundle(&bundle, &public_key).unwrap();
+        assert!(
+            !verified,
+            "Bundle verification should fail with tampered data"
+        );
+    }
+
+    #[test]
+    fn test_signed_bundle_serialization_roundtrip() {
+        let passphrase = SecurePassphrase::new("test-passphrase".into());
+        let (secret_key, public_key) =
+            PgpKeyManager::generate_keypair("alice", &passphrase).unwrap();
+
+        let (mls_client, _dir) =
+            create_test_mls_client("alice", &secret_key, &public_key, &passphrase);
+
+        let bundle = generate_signed_bundle(&mls_client, &secret_key, &passphrase).unwrap();
+
+        // Serialize to JSON and back
+        let json = serde_json::to_string(&bundle).unwrap();
+        let deserialized: SignedKeyPackageBundle = serde_json::from_str(&json).unwrap();
+
+        // Verify the deserialized bundle
+        let verified = verify_bundle(&deserialized, &public_key).unwrap();
+        assert!(verified, "Deserialized bundle should still verify");
     }
 }

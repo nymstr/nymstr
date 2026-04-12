@@ -25,8 +25,9 @@ mls-rs-core = "0.24.0"
 mls-rs-crypto-openssl = "0.18.0"
 mls-rs-provider-sqlite = "0.19.0"
 
-# MLS key encryption
+# MLS key encryption & sealed sender
 aes-gcm = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 # Persistence for epoch buffer
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }

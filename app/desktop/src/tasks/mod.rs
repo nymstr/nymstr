@@ -4,12 +4,10 @@
 //! - Message receive loop (processing incoming mixnet messages)
 //! - Connection monitoring and reconnection
 //! - Epoch buffer retry processing
-//! - Pending message polling (offline queue)
 
 pub mod buffer_processor;
 pub mod connection_monitor;
 pub mod message_loop;
-pub mod pending_poller;
 
 use std::sync::Arc;
 
@@ -31,8 +29,6 @@ pub struct BackgroundTasks {
     pub buffer_processor: Option<JoinHandle<()>>,
     /// Handle to the connection monitor task
     pub connection_monitor: Option<JoinHandle<()>>,
-    /// Handle to the pending message poller task
-    pub pending_poller: Option<JoinHandle<()>>,
 }
 
 impl BackgroundTasks {
@@ -42,7 +38,6 @@ impl BackgroundTasks {
             message_loop: None,
             buffer_processor: None,
             connection_monitor: None,
-            pending_poller: None,
         }
     }
 
@@ -52,7 +47,6 @@ impl BackgroundTasks {
     /// - Message receive loop (processes incoming mixnet messages)
     /// - Buffer processor (retries epoch-buffered MLS messages)
     /// - Connection monitor (checks connection health)
-    /// - Pending message poller (fetches offline-queued messages)
     ///
     /// # Arguments
     /// * `app_handle` - Tauri app handle for event emission
@@ -84,16 +78,12 @@ impl BackgroundTasks {
             Arc::clone(&state),
         );
 
-        // Start pending message poller
-        let pending_poller = pending_poller::start_pending_poller(Arc::clone(&state));
-
         tracing::info!("All background tasks started");
 
         Self {
             message_loop: Some(message_loop),
             buffer_processor: Some(buffer_processor),
             connection_monitor: Some(connection_monitor),
-            pending_poller: Some(pending_poller),
         }
     }
 
@@ -102,7 +92,6 @@ impl BackgroundTasks {
     /// This starts only:
     /// - Buffer processor (retries epoch-buffered MLS messages)
     /// - Connection monitor (checks connection health)
-    /// - Pending message poller (fetches offline-queued messages)
     pub fn start_without_message_loop(
         app_handle: AppHandle,
         state: Arc<AppState>,
@@ -121,16 +110,12 @@ impl BackgroundTasks {
             Arc::clone(&state),
         );
 
-        // Start pending message poller
-        let pending_poller = pending_poller::start_pending_poller(Arc::clone(&state));
-
         tracing::info!("Background tasks started (message loop pending)");
 
         Self {
             message_loop: None,
             buffer_processor: Some(buffer_processor),
             connection_monitor: Some(connection_monitor),
-            pending_poller: Some(pending_poller),
         }
     }
 
@@ -177,11 +162,6 @@ impl BackgroundTasks {
             tracing::debug!("Connection monitor stopped");
         }
 
-        if let Some(handle) = self.pending_poller.take() {
-            handle.abort();
-            tracing::debug!("Pending poller stopped");
-        }
-
         tracing::info!("All background tasks stopped");
     }
 
@@ -203,7 +183,6 @@ impl BackgroundTasks {
         self.message_loop.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
             || self.buffer_processor.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
             || self.connection_monitor.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
-            || self.pending_poller.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
     }
 }
 

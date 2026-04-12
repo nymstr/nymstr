@@ -24,8 +24,6 @@ pub enum MessageRoute {
     Group,
     /// MLS Welcome flow messages (mlsWelcome, groupInvite, groupJoinRequest, etc.)
     WelcomeFlow,
-    /// Pending message delivery (offline message queue)
-    PendingDelivery,
     /// Unknown or unsupported message types
     Unknown,
 }
@@ -38,12 +36,14 @@ impl MessageRouter {
     pub fn route_message(incoming: &Incoming) -> MessageRoute {
         match incoming.envelope.action.as_str() {
             // Authentication flow messages
-            "challenge" | "challengeResponse" | "loginResponse" | "sendResponse" => {
+            "challenge" | "challengeResponse" | "pong" | "sendResponse" => {
                 MessageRoute::Authentication
             }
 
-            // MLS protocol messages (key package exchange, DM handshake)
-            "keyPackageRequest" | "keyPackageResponse" | "p2pWelcome" | "p2pWelcomeAck" => {
+            // MLS protocol messages (key package exchange, DM handshake is sealed)
+            "keyPackageRequest" | "keyPackageResponse"
+            | "fetchKeyPackageChallengeResponse" | "fetchKeyPackageResponse"
+            | "keyPackageNeeded" => {
                 MessageRoute::MlsProtocol
             }
 
@@ -63,9 +63,6 @@ impl MessageRouter {
             // Group server responses
             "fetchGroupResponse" | "sendGroupResponse" | "registerResponse"
             | "approveGroupResponse" | "syncEpochResponse" => MessageRoute::Group,
-
-            // Pending message delivery (offline queue)
-            "fetchPendingResponse" => MessageRoute::PendingDelivery,
 
             // Unknown message type
             _ => MessageRoute::Unknown,
@@ -82,7 +79,6 @@ impl MessageRouter {
             MessageRoute::Handshake => true,       // Handle immediately
             MessageRoute::Group => true,           // Handle group responses immediately
             MessageRoute::WelcomeFlow => true,     // Handle Welcome flow immediately
-            MessageRoute::PendingDelivery => true, // Process pending messages immediately
             MessageRoute::Unknown => false,        // Ignore
         }
     }
@@ -97,7 +93,6 @@ impl MessageRouter {
             MessageRoute::Query => "Query response",
             MessageRoute::Group => "Group server message",
             MessageRoute::WelcomeFlow => "MLS Welcome flow message",
-            MessageRoute::PendingDelivery => "Pending message delivery",
             MessageRoute::Unknown => "Unknown message type",
         }
     }
@@ -106,12 +101,14 @@ impl MessageRouter {
     pub fn route_action(action: &str) -> MessageRoute {
         match action {
             // Authentication flow messages
-            "challenge" | "challengeResponse" | "loginResponse" | "sendResponse" => {
+            "challenge" | "challengeResponse" | "pong" | "sendResponse" => {
                 MessageRoute::Authentication
             }
 
-            // MLS protocol messages (key package exchange, DM handshake)
-            "keyPackageRequest" | "keyPackageResponse" | "p2pWelcome" | "p2pWelcomeAck" => {
+            // MLS protocol messages (key package exchange, DM handshake is sealed)
+            "keyPackageRequest" | "keyPackageResponse"
+            | "fetchKeyPackageChallengeResponse" | "fetchKeyPackageResponse"
+            | "keyPackageNeeded" => {
                 MessageRoute::MlsProtocol
             }
 
@@ -131,9 +128,6 @@ impl MessageRouter {
             // Group server responses
             "fetchGroupResponse" | "sendGroupResponse" | "registerResponse"
             | "approveGroupResponse" | "syncEpochResponse" => MessageRoute::Group,
-
-            // Pending message delivery (offline queue)
-            "fetchPendingResponse" => MessageRoute::PendingDelivery,
 
             // Unknown message type
             _ => MessageRoute::Unknown,
@@ -183,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_mls_protocol_routing() {
-        let messages = ["keyPackageRequest", "keyPackageResponse", "p2pWelcome"];
+        let messages = ["keyPackageRequest", "keyPackageResponse"];
 
         for action in messages {
             let incoming = create_test_incoming(action);

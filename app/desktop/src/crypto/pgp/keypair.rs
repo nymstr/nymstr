@@ -48,10 +48,6 @@ impl SecurePassphrase {
 
         let passphrase = Self::read_password_secure()?;
 
-        if passphrase.len() < 12 {
-            return Err(anyhow!("Passphrase must be at least 12 characters long"));
-        }
-
         Ok(Self::new(passphrase))
     }
 

@@ -34,23 +34,13 @@ pub trait MixnetSender: Send + Sync {
     /// Send registration challenge response
     async fn send_registration_response(&self, username: &str, signature: &str) -> Result<()>;
 
-    /// Send a login request for a username
-    async fn send_login_request(&self, username: &str) -> Result<()>;
-
-    /// Send login challenge response
-    async fn send_login_response(&self, username: &str, signature: &str) -> Result<()>;
+    /// Send a ping to the server to update sender_tag and provide fresh SURBs
+    async fn send_ping(&self, username: &str, timestamp: i64, signature: &str) -> Result<()>;
 
     // ========== Query Methods ==========
 
     /// Send a query request for a user's public key
-    async fn send_query_request(&self, sender: &str, username: &str) -> Result<()>;
-
-    /// Send a fetch pending messages request
-    async fn send_fetch_pending(&self, username: &str, timestamp: i64, signature: &str)
-        -> Result<()>;
-
-    /// Acknowledge receipt of pending messages so the server can delete them
-    async fn send_ack(&self, username: &str, pending_ids: &[String]) -> Result<()>;
+    async fn send_query_request(&self, username: &str) -> Result<()>;
 
     // ========== Direct Messaging Methods ==========
 
@@ -83,6 +73,13 @@ pub trait MixnetSender: Send + Sync {
         signature: &str,
     ) -> Result<()>;
 
+    /// Send a sealed sender message (sender identity hidden from relay)
+    async fn send_sealed_message(
+        &self,
+        recipient: &str,
+        sealed_payload_b64: &str,
+    ) -> Result<()>;
+
     // ========== MLS Key Exchange Methods ==========
 
     /// Send key package request for MLS handshake
@@ -103,29 +100,7 @@ pub trait MixnetSender: Send + Sync {
         signature: &str,
     ) -> Result<()>;
 
-    /// Send P2P MLS welcome message for direct messaging handshake
-    async fn send_p2p_welcome(
-        &self,
-        sender: &str,
-        recipient: &str,
-        welcome_b64: &str,
-        group_id: &str,
-        commit_b64: Option<&str>,
-        ratchet_tree_b64: Option<&str>,
-        signature: &str,
-    ) -> Result<()>;
-
-    /// Send P2P welcome acknowledgment for DM handshake finalization
-    async fn send_p2p_welcome_ack(
-        &self,
-        sender: &str,
-        recipient: &str,
-        conversation_id: &str,
-        accepted: bool,
-        signature: &str,
-    ) -> Result<()>;
-
-    /// Send group join response for MLS handshake
+/// Send group join response for MLS handshake
     async fn send_group_join_response(
         &self,
         sender: &str,
@@ -301,6 +276,32 @@ pub trait MixnetSender: Send + Sync {
         admin: &str,
         signature: &str,
         group_server_address: &str,
+    ) -> Result<()>;
+
+    // ========== Pre-Published Key Package Methods ==========
+
+    /// Publish a signed key package to the server (authenticated)
+    async fn send_publish_key_package(
+        &self,
+        sender: &str,
+        key_package_b64: &str,
+        pgp_signature: &str,
+        pgp_fingerprint: &str,
+        signature: &str,
+    ) -> Result<()>;
+
+    /// Request a PoW challenge for fetching a key package (anonymous)
+    async fn send_fetch_key_package_challenge(
+        &self,
+        target_username: &str,
+    ) -> Result<()>;
+
+    /// Fetch a key package after completing PoW (anonymous)
+    async fn send_fetch_key_package(
+        &self,
+        target_username: &str,
+        challenge: &str,
+        nonce: &str,
     ) -> Result<()>;
 }
 

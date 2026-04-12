@@ -2,7 +2,7 @@
 
 use tauri::State;
 
-use crate::core::message_handler::{normalize_conversation_id, DirectMessageHandlerBuilder};
+use crate::core::message_handler::DirectMessageHandlerBuilder;
 use crate::state::AppState;
 use crate::types::ApiError;
 
@@ -37,25 +37,41 @@ pub async fn get_contact_requests(
     Ok(result)
 }
 
-/// Accept a contact request: respond with our key package to complete the handshake.
+/// Accept a contact request: join the MLS group from the stored Welcome and send p2pWelcomeAck.
 /// Returns `{ conversationId, fromUsername }` so the frontend can create the conversation.
 #[tauri::command]
 pub async fn accept_contact_request(
     from_username: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, ApiError> {
-    // Verify the request exists
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM contact_requests WHERE from_username = ? AND status = 'pending'",
+    use crate::crypto::mls::MlsMessageType;
+
+    // Fetch the stored welcome payload
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT welcome_payload FROM contact_requests WHERE from_username = ? AND status = 'pending'",
     )
     .bind(&from_username)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    if exists.is_none() {
-        return Err(ApiError::not_found("Contact request not found or already handled"));
-    }
+    let welcome_payload_json = match row {
+        Some((payload,)) => payload,
+        None => return Err(ApiError::not_found("Contact request not found or already handled")),
+    };
+
+    let welcome_payload: serde_json::Value = serde_json::from_str(&welcome_payload_json)
+        .map_err(|e| ApiError::internal(format!("Invalid stored welcome payload: {}", e)))?;
+
+    let welcome_message = welcome_payload
+        .get("welcomeMessage")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::internal("Missing welcomeMessage in stored payload"))?;
+
+    let group_id = welcome_payload
+        .get("groupId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
     tracing::info!("Accepting contact request from {}", from_username);
 
@@ -77,7 +93,49 @@ pub async fn accept_contact_request(
         .await
         .ok_or_else(|| ApiError::internal("PGP keys not available"))?;
 
-    // Build the handler and respond to the key package request
+    // Fetch the sender's public key from the server (authoritative source).
+    // Check query_cache first to avoid a round-trip if we already have it.
+    let cached_pk: Option<String> = sqlx::query_scalar(
+        "SELECT public_key FROM query_cache WHERE username = ?"
+    )
+    .bind(&from_username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let sender_public_key = if let Some(pk) = cached_pk.filter(|pk| !pk.is_empty()) {
+        pk
+    } else {
+        // Query the server for the sender's public key
+        let rx = state.register_pending_query(&from_username).await;
+        mixnet_service
+            .send_query_request(&from_username)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to query sender: {}", e)))?;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), rx).await;
+        match result {
+            Ok(Ok(Some(query_result))) => {
+                // Cache for future use
+                let _ = sqlx::query(
+                    "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)"
+                )
+                .bind(&from_username)
+                .bind(&query_result.public_key)
+                .execute(&state.db)
+                .await;
+                query_result.public_key
+            }
+            Ok(Ok(None)) => {
+                return Err(ApiError::not_found("Sender not found on server"));
+            }
+            _ => {
+                state.cancel_pending_query(&from_username).await;
+                return Err(ApiError::timeout("Timed out fetching sender's public key"));
+            }
+        }
+    };
+
     let handler = DirectMessageHandlerBuilder::new()
         .mls_client(mls_client)
         .mixnet_service(mixnet_service)
@@ -87,40 +145,37 @@ pub async fn accept_contact_request(
         .build()
         .map_err(|e| ApiError::internal(format!("Failed to build handler: {}", e)))?;
 
-    // Respond with our key package — the initiator's KP is no longer sent in the request
+    // Join the MLS group from the stored Welcome message
     handler
-        .respond_to_key_package_request(&from_username, "")
+        .process_incoming_message(&from_username, welcome_message, MlsMessageType::Welcome)
         .await
-        .map_err(|e| ApiError::internal(format!("Failed to respond to key package: {}", e)))?;
+        .map_err(|e| ApiError::internal(format!("Failed to join MLS group: {}", e)))?;
 
-    // Compute conversation ID
-    let conversation_id = normalize_conversation_id(&current_user.username, &from_username);
-
-    // Create the conversation entry in the DB so it persists
+    // Add the user as a contact with their server-verified public key BEFORE
+    // sending the ack — the sealed ack needs to look up their public key from
+    // the contacts table to encrypt the envelope.
     sqlx::query(
         r#"
-        INSERT OR IGNORE INTO conversations (id)
-        VALUES (?)
-        "#,
-    )
-    .bind(&conversation_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    // Add the user as a contact so they appear in the contacts list
-    sqlx::query(
-        r#"
-        INSERT OR IGNORE INTO contacts (owner_username, username, display_name, public_key, created_at)
-        VALUES (?, ?, ?, '', datetime('now'))
+        INSERT OR REPLACE INTO contacts (owner_username, username, display_name, public_key, created_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
         "#,
     )
     .bind(&current_user.username)
     .bind(&from_username)
     .bind(&from_username)
+    .bind(&sender_public_key)
     .execute(&state.db)
     .await
     .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    // Send p2pWelcomeAck so the initiator can apply the deferred commit
+    handler
+        .send_welcome_ack(&from_username, group_id, true)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to send welcome ack: {}", e)))?;
+
+    // Use peer username as the conversation ID (matches frontend convention)
+    let conversation_id = from_username.clone();
 
     // Mark the request as accepted
     sqlx::query("UPDATE contact_requests SET status = 'accepted' WHERE from_username = ?")

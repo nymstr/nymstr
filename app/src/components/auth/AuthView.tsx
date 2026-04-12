@@ -118,11 +118,11 @@ export function AuthView() {
 
         setCompletedSteps(['loading_keys']);
         setCurrentStep('connecting_mixnet');
-        await api.connectToMixnet();
+        await api.connectToMixnetForUser(username);
 
         setCompletedSteps(['loading_keys', 'connecting_mixnet']);
         setCurrentStep('authenticating');
-        const user = await api.loginUser(username, passphrase);
+        const user = await api.pingServer(username, passphrase);
 
         setCompletedSteps(['loading_keys', 'connecting_mixnet', 'authenticating']);
         setCurrentStep('loading_conversations');

@@ -16,7 +16,7 @@ hex = "0.4"
 sha2 = "0.10"
 base64 = "0.21"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
-nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
+nym-sdk = { git = "file:///Users/zmain/nymstr/nym", branch = "develop" }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 toml = "0.8"

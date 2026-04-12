@@ -314,12 +314,18 @@ async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
             from_username TEXT NOT NULL,
             received_at TEXT NOT NULL DEFAULT (datetime('now')),
             status TEXT NOT NULL DEFAULT 'pending',
+            welcome_payload TEXT,
             UNIQUE(from_username)
         )
         "#,
     )
     .execute(db)
     .await?;
+
+    // Migrate: add welcome_payload column if missing (table may pre-date this column)
+    let _ = sqlx::query("ALTER TABLE contact_requests ADD COLUMN welcome_payload TEXT")
+        .execute(db)
+        .await;
 
     // Pending handshakes table - tracks DM handshakes awaiting p2pWelcomeAck
     sqlx::query(
@@ -329,6 +335,20 @@ async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
             mls_group_id TEXT NOT NULL,
             conversation_id TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Pending outreach table - queued initial conversation attempts
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS pending_outreach (
+            recipient TEXT PRIMARY KEY,
+            message_draft TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            retry_count INTEGER NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -393,6 +413,17 @@ async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_contact_requests_status ON contact_requests(status)")
         .execute(db)
         .await?;
+
+    // Query cache: store public keys from discovery server lookups
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS query_cache (
+            username TEXT PRIMARY KEY,
+            public_key TEXT NOT NULL,
+            cached_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )"
+    )
+    .execute(db)
+    .await?;
 
     Ok(())
 }

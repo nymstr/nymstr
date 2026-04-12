@@ -37,13 +37,13 @@ pub async fn get_server_address(state: State<'_, AppState>) -> Result<Option<Str
     Ok(state.get_server_address().await)
 }
 
-/// Connect to the Nym mixnet
+/// Connect to the Nym mixnet with persistent storage (pre-auth)
 ///
-/// This creates a new MixnetService and connects to the network.
-/// For persistent storage, provide a username via `connect_to_mixnet_for_user`.
+/// Uses a default storage path for pre-authentication connections (e.g. registration).
+/// For user-specific storage, use `connect_to_mixnet_for_user`.
 #[tauri::command]
 pub async fn connect_to_mixnet(state: State<'_, AppState>) -> Result<String, ApiError> {
-    tracing::info!("Connecting to mixnet (ephemeral mode)...");
+    tracing::info!("Connecting to mixnet (persistent, pre-auth)...");
 
     // Check if already connected
     if state.get_mixnet_service().await.is_some() {
@@ -54,8 +54,12 @@ pub async fn connect_to_mixnet(state: State<'_, AppState>) -> Result<String, Api
         }
     }
 
-    // Create ephemeral mixnet client
-    let (service, incoming_rx) = MixnetService::new_ephemeral()
+    // Use a default storage path for pre-auth connections
+    let storage_dir = state.get_mixnet_storage_dir("_pre_auth");
+    tracing::info!("Mixnet storage directory: {:?}", storage_dir);
+
+    // Create persistent mixnet client
+    let (service, incoming_rx) = MixnetService::new_with_storage(storage_dir)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to connect to mixnet: {}", e)))?;
 
