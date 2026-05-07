@@ -3,5 +3,11 @@ node_modules/
 dist/
 *.log
 .env
+.envrc
 .DS_Store
+
+# Cloudflare Worker (scripts/discovery)
+scripts/discovery/wrangler.toml*
+scripts/discovery/.wrangler/
+scripts/discovery/.dev.vars
 Cargo.lock

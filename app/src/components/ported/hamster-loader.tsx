@@ -1,14 +1,17 @@
 interface HamsterLoaderProps {
   message?: string;
+  /** Font-size in px that scales the whole hamster+wheel. Default 14. */
+  sizePx?: number;
 }
 
-export function HamsterLoader({ message }: HamsterLoaderProps) {
+export function HamsterLoader({ message, sizePx }: HamsterLoaderProps) {
   return (
     <div className="flex flex-col items-center justify-center gap-6">
       <div
         aria-label="Orange and tan hamster running in a metal wheel"
         role="img"
         className="wheel-and-hamster"
+        style={sizePx ? { fontSize: `${sizePx}px` } : undefined}
       >
         <div className="wheel" />
         <div className="hamster">

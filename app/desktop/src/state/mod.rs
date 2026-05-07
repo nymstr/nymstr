@@ -27,6 +27,41 @@ pub struct QueryResult {
     pub public_key: String,
 }
 
+/// Provenance of the stored discovery-server Nym address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerAddressSource {
+    #[default]
+    Unset,
+    Manual,
+    Resolved,
+}
+
+fn load_server_settings(path: &std::path::Path) -> (Option<String>, ServerAddressSource) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return (None, ServerAddressSource::Unset);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return (None, ServerAddressSource::Unset);
+    };
+    let address = value
+        .get("server_address")
+        .and_then(|s| s.as_str())
+        .map(String::from);
+    let source = value
+        .get("server_address_source")
+        .and_then(|v| serde_json::from_value::<ServerAddressSource>(v.clone()).ok())
+        .unwrap_or_else(|| {
+            // Legacy settings.json had only `server_address`; treat it as manual.
+            if address.is_some() {
+                ServerAddressSource::Manual
+            } else {
+                ServerAddressSource::Unset
+            }
+        });
+    (address, source)
+}
+
 /// Main application state shared across all Tauri commands
 ///
 /// All mutable state is wrapped in Arc<RwLock<T>> to enable safe sharing
@@ -47,6 +82,10 @@ pub struct AppState {
 
     /// Nym server address (nymstr-server discovery node)
     pub server_address: Arc<RwLock<Option<String>>>,
+
+    /// How the current server address was obtained. Manual entries are
+    /// preserved across auto-resolves.
+    pub server_address_source: Arc<RwLock<ServerAddressSource>>,
 
     /// Mixnet service for anonymous messaging (initialized on connect)
     pub mixnet_service: Arc<RwLock<Option<Arc<MixnetService>>>>,
@@ -109,17 +148,7 @@ impl AppState {
 
         // Load server address from settings file if it exists
         let settings_path = app_dir.join("settings.json");
-        let server_address = if settings_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&settings_path) {
-                serde_json::from_str::<serde_json::Value>(&content)
-                    .ok()
-                    .and_then(|v| v.get("server_address").and_then(|s| s.as_str().map(String::from)))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let (server_address, server_address_source) = load_server_settings(&settings_path);
 
         Ok(Self {
             db,
@@ -130,6 +159,7 @@ impl AppState {
                 mixnet_address: None,
             })),
             server_address: Arc::new(RwLock::new(server_address)),
+            server_address_source: Arc::new(RwLock::new(server_address_source)),
             mixnet_service: Arc::new(RwLock::new(None)),
             incoming_rx: Arc::new(RwLock::new(None)),
             pgp_secret_key: Arc::new(RwLock::new(None)),
@@ -178,14 +208,36 @@ impl AppState {
         self.connection_status.read().await.clone()
     }
 
-    /// Set the server address
+    /// Set the server address as a manual override. Marks the source as
+    /// `Manual` so that auto-resolution leaves it alone.
     pub async fn set_server_address(&self, address: Option<String>) -> Result<(), std::io::Error> {
-        *self.server_address.write().await = address.clone();
+        self.write_server_address(address, ServerAddressSource::Manual)
+            .await
+    }
 
-        // Persist to settings file
+    /// Persist a server address that came from auto-resolution.
+    pub async fn set_resolved_server_address(
+        &self,
+        address: String,
+    ) -> Result<(), std::io::Error> {
+        self.write_server_address(Some(address), ServerAddressSource::Resolved)
+            .await
+    }
+
+    async fn write_server_address(
+        &self,
+        address: Option<String>,
+        source: ServerAddressSource,
+    ) -> Result<(), std::io::Error> {
+        *self.server_address.write().await = address.clone();
+        *self.server_address_source.write().await = source;
+
         let settings_path = self.app_dir.join("settings.json");
+        let now = chrono::Utc::now().timestamp();
         let settings = serde_json::json!({
-            "server_address": address
+            "server_address": address,
+            "server_address_source": source,
+            "server_address_resolved_at": if address.is_some() { Some(now) } else { None },
         });
         std::fs::write(settings_path, serde_json::to_string_pretty(&settings)?)?;
         Ok(())
@@ -194,6 +246,11 @@ impl AppState {
     /// Get the server address
     pub async fn get_server_address(&self) -> Option<String> {
         self.server_address.read().await.clone()
+    }
+
+    /// Get how the current server address was obtained.
+    pub async fn get_server_address_source(&self) -> ServerAddressSource {
+        *self.server_address_source.read().await
     }
 
     /// Store the discovery server's public key (TOFU: Trust-On-First-Use).

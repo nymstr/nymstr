@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::core::mixnet_client::MixnetService;
-use crate::state::AppState;
+use crate::state::{AppState, ServerAddressSource};
 use crate::types::{ApiError, ConnectionStatus};
 
 /// Set the Nym server address (nymstr-server discovery node)
@@ -35,6 +35,51 @@ pub async fn set_server_address(
 #[tauri::command]
 pub async fn get_server_address(state: State<'_, AppState>) -> Result<Option<String>, ApiError> {
     Ok(state.get_server_address().await)
+}
+
+/// Resolve the discovery-server Nym address by querying
+/// `https://api.<domain>/api/v1/address` over the Nym mixnet SOCKS5 proxy.
+///
+/// The resolved address is persisted via `set_server_address`. Pass `None`
+/// to use the default bootstrap domain (`nymstr.com`).
+#[tauri::command]
+pub async fn resolve_server_address(
+    state: State<'_, AppState>,
+    domain: Option<String>,
+    force: Option<bool>,
+) -> Result<String, ApiError> {
+    let domain = domain.unwrap_or_else(|| "nymstr.com".to_string());
+    let force = force.unwrap_or(false);
+
+    let source = state.get_server_address_source().await;
+    if let Some(existing) = state.get_server_address().await {
+        if source == ServerAddressSource::Manual {
+            tracing::info!("Keeping manual server address; skipping resolve");
+            return Ok(existing);
+        }
+        if !force {
+            tracing::info!("Using cached resolved server address; skipping resolve");
+            return Ok(existing);
+        }
+    }
+
+    tracing::info!("Resolving discovery-server address via mixnet for {}", domain);
+    let recipient = nymstr_discovery::Discovery::default()
+        .resolve(&domain)
+        .await
+        .map_err(|e| ApiError::internal(format!("Discovery failed for {}: {}", domain, e)))?;
+
+    let address = recipient.to_string();
+    state
+        .set_resolved_server_address(address.clone())
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to save settings: {}", e)))?;
+
+    if let Some(service) = state.get_mixnet_service().await {
+        service.set_server_address(Some(address.clone())).await;
+    }
+
+    Ok(address)
 }
 
 /// Connect to the Nym mixnet with persistent storage (pre-auth)
@@ -66,8 +111,8 @@ pub async fn connect_to_mixnet(state: State<'_, AppState>) -> Result<String, Api
     let address = service.our_address().to_string();
     tracing::info!("Connected to mixnet: {}", address);
 
-    // Set server address if configured
-    if let Some(server_addr) = state.get_server_address().await {
+    // Set server address, auto-resolving on first launch.
+    if let Some(server_addr) = ensure_server_address(&state).await? {
         service.set_server_address(Some(server_addr)).await;
     }
 
@@ -79,6 +124,28 @@ pub async fn connect_to_mixnet(state: State<'_, AppState>) -> Result<String, Api
         .await;
 
     Ok(address)
+}
+
+/// Return the configured discovery-server address, auto-resolving via the
+/// mixnet if none has been persisted yet.
+async fn ensure_server_address(state: &AppState) -> Result<Option<String>, ApiError> {
+    if let Some(addr) = state.get_server_address().await {
+        return Ok(Some(addr));
+    }
+
+    tracing::info!("No discovery-server address configured; bootstrapping via mixnet…");
+    let recipient = nymstr_discovery::Discovery::default()
+        .resolve("nymstr.com")
+        .await
+        .map_err(|e| ApiError::internal(format!("Discovery bootstrap failed: {:#}", e)))?;
+
+    let address = recipient.to_string();
+    tracing::info!("Resolved discovery-server address: {}", address);
+    state
+        .set_resolved_server_address(address.clone())
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to save settings: {}", e)))?;
+    Ok(Some(address))
 }
 
 /// Connect to the Nym mixnet with persistent storage for a specific user
@@ -115,8 +182,8 @@ pub async fn connect_to_mixnet_for_user(
     let address = service.our_address().to_string();
     tracing::info!("Connected to mixnet: {}", address);
 
-    // Set server address if configured
-    if let Some(server_addr) = state.get_server_address().await {
+    // Set server address, auto-resolving on first launch.
+    if let Some(server_addr) = ensure_server_address(&state).await? {
         service.set_server_address(Some(server_addr)).await;
     }
 

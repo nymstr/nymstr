@@ -82,6 +82,7 @@ pub fn run() {
             commands::get_connection_status,
             commands::set_server_address,
             commands::get_server_address,
+            commands::resolve_server_address,
             // Contact commands
             commands::get_contacts,
             commands::add_contact,

@@ -1,0 +1,18 @@
+[package]
+name = "nymstr-discovery"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+url = "2"
+nym-sdk = { git = "file:///Users/zmain/nymstr/nym", branch = "develop" }
+nym-validator-client = { git = "file:///Users/zmain/nymstr/nym", branch = "develop" }
+# Force `alloc` feature on for cosmwasm-crypto (transitive of nym-validator-client)
+ed25519-zebra = { version = "4", features = ["alloc"] }
+

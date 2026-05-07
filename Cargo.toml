@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/nymstr-common",
     "crates/nymstr-crypto",
+    "crates/nymstr-discovery",
     "crates/nymstr-transport",
     "nymstr-server",
     "nymstr-group",

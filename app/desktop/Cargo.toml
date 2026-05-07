@@ -73,6 +73,9 @@ tokio-stream = "0.1"
 # Sealed sender crypto
 nymstr-crypto = { path = "../../crates/nymstr-crypto" }
 
+# Discovery-server address lookup over mixnet SOCKS5
+nymstr-discovery = { path = "../../crates/nymstr-discovery" }
+
 # Logging
 log = "0.4"
 env_logger = "0.9"

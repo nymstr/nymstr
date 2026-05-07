@@ -6,10 +6,10 @@ import {
   Search,
   X,
   AtSign,
-  Loader2,
   AlertCircle,
   MessageCircle,
 } from "lucide-react";
+import { HamsterLoader } from "@/components/ported/hamster-loader";
 import { useNewConversation } from "@/hooks/useNewConversation";
 import { showToast } from "@/hooks/useToast";
 
@@ -115,9 +115,8 @@ export function UserSearch({ onOpenConversation, onClose }: UserSearchProps) {
         )}
 
         {status === "querying" && (
-          <div className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="text-sm">Looking up @{query}...</span>
+          <div className="flex items-center justify-center py-8">
+            <HamsterLoader sizePx={6} message={`Looking up @${query}...`} />
           </div>
         )}
 
@@ -162,9 +161,8 @@ export function UserSearch({ onOpenConversation, onClose }: UserSearchProps) {
         )}
 
         {status === "initiating" && (
-          <div className="flex items-center justify-center gap-2 py-12 text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="text-sm">Establishing secure session...</span>
+          <div className="flex items-center justify-center py-8">
+            <HamsterLoader sizePx={6} message="Establishing secure session..." />
           </div>
         )}
 
