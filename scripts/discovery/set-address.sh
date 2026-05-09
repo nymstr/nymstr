@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Publish or rotate the nymstr discovery-server Nym address.
+# Publish or rotate a discovery-server Nym address into the KV store
+# backing the worker in worker.js.
 #
 # Required env vars:
 #   CF_API_TOKEN         Cloudflare API token (KV:Edit scope)
 #   CF_ACCOUNT_ID        Cloudflare account ID
 #   CF_KV_NAMESPACE_ID   KV namespace ID bound as DISCOVERY_KV in the worker
+#
+# Optional env vars:
+#   DISCOVERY_DOMAIN     Domain serving the worker (e.g. example.com).
+#                        If set, the script verifies the published address
+#                        by hitting https://api.<domain>/api/v1/address.
 #
 # Usage:
 #   ./set-address.sh <nym-address>
@@ -41,10 +47,13 @@ put() {
     --data-binary "$addr" \
     "$API" | grep -q '"success":true' && echo "ok"
 
-  echo "verifying at https://api.nymstr.com/api/v1/address ..."
-  sleep 2
-  curl -fsS https://api.nymstr.com/api/v1/address || echo "(not reachable yet — Cloudflare edge may take ~30s)"
-  echo
+  if [[ -n "${DISCOVERY_DOMAIN:-}" ]]; then
+    local verify_url="https://api.${DISCOVERY_DOMAIN}/api/v1/address"
+    echo "verifying at ${verify_url} ..."
+    sleep 2
+    curl -fsS "$verify_url" || echo "(not reachable yet — Cloudflare edge may take ~30s)"
+    echo
+  fi
 }
 
 case "${1:-}" in

@@ -1,0 +1,13 @@
+name = "nymstr-discovery-api"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Custom domain — replace with your own zone (must be on this Cloudflare account).
+routes = [
+  { pattern = "api.example.com/api/v1/*", zone_name = "example.com" }
+]
+
+# Fill in after `wrangler kv namespace create DISCOVERY_KV`
+[[kv_namespaces]]
+binding = "DISCOVERY_KV"
+id = ""
