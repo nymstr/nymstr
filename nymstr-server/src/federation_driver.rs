@@ -4,6 +4,10 @@
 //! module with I/O — everything it persists or signs is produced by the
 //! pure-logic modules.
 
+use crate::db_utils::DbUtils;
+use anyhow::{Context, Result};
+use chrono::Utc;
+use nymstr_crypto::ServerKeyManager;
 use nymstr_federation::entry::{DirectoryEntry, DirectoryState};
 use nymstr_federation::epoch::{build_epoch, EpochContext};
 use nymstr_federation::merkle::Hash;
@@ -13,10 +17,6 @@ use nymstr_federation::node::{
     PROMISE_WINDOW_EPOCHS,
 };
 use nymstr_federation::FederationError;
-use nymstr_crypto::ServerKeyManager;
-use crate::db_utils::DbUtils;
-use anyhow::{Context, Result};
-use chrono::Utc;
 use serde_json::json;
 
 /// Default epoch interval (spec §2.2 descriptor field).
@@ -131,7 +131,10 @@ impl NamespaceLog {
 
     /// Attach a witness signature to the in-memory latest STH (the persisted
     /// copy is updated separately by the wire handler).
-    pub fn attach_witness_to_last(&mut self, witness_sig: nymstr_federation::node::WitnessSignature) {
+    pub fn attach_witness_to_last(
+        &mut self,
+        witness_sig: nymstr_federation::node::WitnessSignature,
+    ) {
         if let Some(sth) = self.last_sth.as_mut() {
             if !sth
                 .witness_sigs
@@ -163,7 +166,8 @@ impl NamespaceLog {
         &mut self,
         mutation: Mutation,
     ) -> Result<std::result::Result<InclusionPromise, FederationError>> {
-        if let Err(e) = mutation.validate(&self.state, &nymstr_federation::PgpVerifier, Utc::now()) {
+        if let Err(e) = mutation.validate(&self.state, &nymstr_federation::PgpVerifier, Utc::now())
+        {
             return Ok(Err(e));
         }
         let mutation_hash = mutation.hash_hex().map_err(|e| anyhow::anyhow!(e))?;
@@ -212,7 +216,8 @@ impl NamespaceLog {
             log_leaves: &self.log_leaves,
         };
         let (new_state, header, accepted, rejected) =
-            build_epoch(&self.state, pool, &ctx, &nymstr_federation::PgpVerifier).map_err(|e| anyhow::anyhow!(e))?;
+            build_epoch(&self.state, pool, &ctx, &nymstr_federation::PgpVerifier)
+                .map_err(|e| anyhow::anyhow!(e))?;
 
         let epoch_hash = header.hash_hex().map_err(|e| anyhow::anyhow!(e))?;
         let sth = SignedTreeHead {

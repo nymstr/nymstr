@@ -32,14 +32,12 @@ pub async fn setup_persistent_test_db() -> Result<(SqlitePool, tempfile::TempDir
 /// Seed test users in the database
 pub async fn seed_users(pool: &SqlitePool, users: &[(&str, &str)]) -> Result<()> {
     for (username, public_key) in users {
-        sqlx::query(
-            "INSERT INTO users (username, display_name, public_key) VALUES (?, ?, ?)",
-        )
-        .bind(username)
-        .bind(username)
-        .bind(public_key)
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO users (username, display_name, public_key) VALUES (?, ?, ?)")
+            .bind(username)
+            .bind(username)
+            .bind(public_key)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -62,7 +60,10 @@ impl TestContext {
     pub async fn new() -> Result<Self> {
         init_test_logging();
         let db = setup_test_db().await?;
-        Ok(Self { db, _temp_dir: None })
+        Ok(Self {
+            db,
+            _temp_dir: None,
+        })
     }
 
     /// Create a new test context with persistent database
@@ -82,7 +83,10 @@ macro_rules! assert_message_eq {
     ($left:expr, $right:expr) => {
         assert_eq!($left.action, $right.action, "Message actions differ");
         assert_eq!($left.sender, $right.sender, "Message senders differ");
-        assert_eq!($left.recipient, $right.recipient, "Message recipients differ");
+        assert_eq!(
+            $left.recipient, $right.recipient,
+            "Message recipients differ"
+        );
     };
 }
 

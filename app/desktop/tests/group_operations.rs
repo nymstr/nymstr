@@ -6,8 +6,8 @@
 mod common;
 
 use anyhow::Result;
-use nymstr_app_v2_lib::core::messages::MixnetMessage;
 use common::TestContext;
+use nymstr_app_v2_lib::core::messages::MixnetMessage;
 
 /// Test group registration message format
 #[tokio::test]
@@ -63,7 +63,13 @@ async fn test_fetch_group_message_format() -> Result<()> {
 /// Test approve group member message format
 #[tokio::test]
 async fn test_approve_group_member_format() -> Result<()> {
-    let msg = MixnetMessage::approve_group_member("admin", "new_member", "signature", "group-server-1", 1700000000);
+    let msg = MixnetMessage::approve_group_member(
+        "admin",
+        "new_member",
+        "signature",
+        "group-server-1",
+        1700000000,
+    );
 
     assert_eq!(msg.message_type, "system");
     assert_eq!(msg.action, "approveGroup");
@@ -267,7 +273,8 @@ async fn test_store_welcome_format() -> Result<()> {
 /// Test buffer commit message format
 #[tokio::test]
 async fn test_buffer_commit_format() -> Result<()> {
-    let msg = MixnetMessage::buffer_commit("alice", "group-123", 5, "commit_bytes_b64", "signature");
+    let msg =
+        MixnetMessage::buffer_commit("alice", "group-123", 5, "commit_bytes_b64", "signature");
 
     assert_eq!(msg.message_type, "system");
     assert_eq!(msg.action, "bufferCommit");

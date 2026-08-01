@@ -50,7 +50,9 @@ async fn test_full_dm_handshake_with_mls() {
     // Bob fetches pending → gets keyPackageRequest
     let pending = fetch_pending(&mut server, &bob).await;
     assert!(
-        pending.iter().any(|m| m["action"].as_str() == Some("keyPackageRequest")),
+        pending
+            .iter()
+            .any(|m| m["action"].as_str() == Some("keyPackageRequest")),
         "Bob should have keyPackageRequest in pending"
     );
 
@@ -104,8 +106,8 @@ async fn test_full_dm_handshake_with_mls() {
         .encode(conversation.commit_message.as_ref().unwrap());
     let ratchet_tree_b64 = base64::engine::general_purpose::STANDARD
         .encode(conversation.ratchet_tree.as_ref().unwrap());
-    let conversation_id_b64 = base64::engine::general_purpose::STANDARD
-        .encode(&conversation.conversation_id);
+    let conversation_id_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&conversation.conversation_id);
 
     // Alice sends p2pWelcome to Bob via server
     server
@@ -141,7 +143,10 @@ async fn test_full_dm_handshake_with_mls() {
     // Bob joins the conversation using real MLS
     let bob_conversation = bob.mls().join_conversation(&welcome_bytes).await.unwrap();
 
-    assert_eq!(bob_conversation.conversation_id, conversation.conversation_id);
+    assert_eq!(
+        bob_conversation.conversation_id,
+        conversation.conversation_id
+    );
     assert_eq!(bob_conversation.participants, 2);
 
     // Bob sends p2pWelcomeAck to Alice
@@ -163,7 +168,9 @@ async fn test_full_dm_handshake_with_mls() {
 
     let pending = fetch_pending(&mut server, &alice).await;
     assert!(
-        pending.iter().any(|m| m["action"].as_str() == Some("p2pWelcomeAck")),
+        pending
+            .iter()
+            .any(|m| m["action"].as_str() == Some("p2pWelcomeAck")),
         "Alice should have p2pWelcomeAck"
     );
 
@@ -188,13 +195,12 @@ async fn test_full_dm_handshake_with_mls() {
     assert_eq!(encrypted.conversation_id, conversation.conversation_id);
 
     // Bob decrypts the message
-    let decrypted = bob
-        .mls()
-        .decrypt_message(&encrypted)
-        .await
-        .unwrap();
+    let decrypted = bob.mls().decrypt_message(&encrypted).await.unwrap();
 
-    assert_eq!(decrypted, plaintext, "Decrypted message should match plaintext");
+    assert_eq!(
+        decrypted, plaintext,
+        "Decrypted message should match plaintext"
+    );
 }
 
 /// Verify key package generation produces valid packages.

@@ -92,8 +92,7 @@ impl TestClient {
         std::fs::create_dir_all(&keys_dir).unwrap();
 
         let crypto =
-            nymstr_crypto::ServerKeyManager::new(keys_dir, "client-password".into())
-                .unwrap();
+            nymstr_crypto::ServerKeyManager::new(keys_dir, "client-password".into()).unwrap();
         let public_key = crypto.generate_key_pair(username).unwrap();
 
         let tag = nymstr_server::transport::ReplyTag::Stdio(username.to_string());
@@ -203,7 +202,11 @@ impl TestClient {
 /// Helper: register a client with the server (challenge-response flow).
 async fn register_client(server: &mut TestServer, client: &TestClient) {
     let replies = server.send(&client.tag, client.register_msg()).await;
-    assert!(!replies.is_empty(), "No reply to register for {}", client.username);
+    assert!(
+        !replies.is_empty(),
+        "No reply to register for {}",
+        client.username
+    );
     let nonce = extract_nonce(&replies[0].1);
     let replies = server
         .send(&client.tag, client.registration_response_msg(&nonce))
@@ -220,7 +223,11 @@ async fn register_client(server: &mut TestServer, client: &TestClient) {
 /// Helper: fetch pending messages for a client.
 async fn fetch_pending(server: &mut TestServer, client: &TestClient) -> Vec<Value> {
     let replies = server.send(&client.tag, client.fetch_pending_msg()).await;
-    assert!(!replies.is_empty(), "No reply to fetchPending for {}", client.username);
+    assert!(
+        !replies.is_empty(),
+        "No reply to fetchPending for {}",
+        client.username
+    );
     let response = &replies[0].1;
     let payload = &response["payload"];
     let messages = payload.get("messages").and_then(Value::as_array);
@@ -400,7 +407,9 @@ async fn test_query_nonexistent_user() {
     let content = replies[0].1["content"].as_str().unwrap();
     let content_lower = content.to_lowercase();
     assert!(
-        content_lower.contains("no user") || content_lower.contains("not found") || content_lower.contains("error"),
+        content_lower.contains("no user")
+            || content_lower.contains("not found")
+            || content_lower.contains("error"),
         "Expected error or 'not found', got: {}",
         content
     );
@@ -469,9 +478,7 @@ async fn test_dm_handshake_full_flow() {
     // Server may send best-effort delivery to Bob + no error to Alice
     // (relay_with_persistence doesn't send a success reply to sender for relay actions)
     // Bob should see the message when fetching pending
-    let bob_got_direct = replies
-        .iter()
-        .any(|(tag, _)| tag == &bob.tag.to_string());
+    let bob_got_direct = replies.iter().any(|(tag, _)| tag == &bob.tag.to_string());
 
     // --- Step 2: Bob fetches pending messages ---
     let pending = fetch_pending(&mut server, &bob).await;
@@ -528,11 +535,7 @@ async fn test_relay_to_nonexistent_user_queued() {
     let replies = server
         .send(
             &alice.tag,
-            alice.relay_msg(
-                "keyPackageRequest",
-                "ghost",
-                json!({"keyPackage": "test"}),
-            ),
+            alice.relay_msg("keyPackageRequest", "ghost", json!({"keyPackage": "test"})),
         )
         .await;
 

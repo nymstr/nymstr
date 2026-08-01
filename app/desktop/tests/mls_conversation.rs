@@ -6,17 +6,13 @@
 mod common;
 
 use anyhow::Result;
-use nymstr_app_v2_lib::core::messages::MixnetMessage;
 use common::TestContext;
+use nymstr_app_v2_lib::core::messages::MixnetMessage;
 
 /// Test key package request message format
 #[tokio::test]
 async fn test_key_package_request_format() -> Result<()> {
-    let msg = MixnetMessage::key_package_request(
-        "alice",
-        "bob",
-        "signature",
-    );
+    let msg = MixnetMessage::key_package_request("alice", "bob", "signature");
 
     assert_eq!(msg.message_type, "system");
     assert_eq!(msg.action, "keyPackageRequest");
@@ -74,13 +70,7 @@ async fn test_mls_message_raw_format() -> Result<()> {
     let conv_id = b"conversation-bytes";
     let mls_message = b"encrypted-mls-message-bytes";
 
-    let msg = MixnetMessage::mls_message_raw(
-        "alice",
-        "bob",
-        conv_id,
-        mls_message,
-        "signature",
-    );
+    let msg = MixnetMessage::mls_message_raw("alice", "bob", conv_id, mls_message, "signature");
 
     assert_eq!(msg.message_type, "message");
     assert_eq!(msg.action, "send");
@@ -189,21 +179,18 @@ async fn test_mls_groups_storage() -> Result<()> {
     // Insert MLS group state
     let group_state = vec![1u8, 2, 3, 4, 5]; // Simulated serialized MLS group
 
-    sqlx::query(
-        "INSERT INTO mls_groups (conversation_id, group_state) VALUES (?, ?)",
-    )
-    .bind("conv-123")
-    .bind(&group_state)
-    .execute(&ctx.db)
-    .await?;
+    sqlx::query("INSERT INTO mls_groups (conversation_id, group_state) VALUES (?, ?)")
+        .bind("conv-123")
+        .bind(&group_state)
+        .execute(&ctx.db)
+        .await?;
 
     // Query group state
-    let (stored_state,): (Vec<u8>,) = sqlx::query_as(
-        "SELECT group_state FROM mls_groups WHERE conversation_id = ?",
-    )
-    .bind("conv-123")
-    .fetch_one(&ctx.db)
-    .await?;
+    let (stored_state,): (Vec<u8>,) =
+        sqlx::query_as("SELECT group_state FROM mls_groups WHERE conversation_id = ?")
+            .bind("conv-123")
+            .fetch_one(&ctx.db)
+            .await?;
 
     assert_eq!(stored_state, group_state);
 
@@ -217,12 +204,11 @@ async fn test_mls_groups_storage() -> Result<()> {
     .execute(&ctx.db)
     .await?;
 
-    let (updated_state,): (Vec<u8>,) = sqlx::query_as(
-        "SELECT group_state FROM mls_groups WHERE conversation_id = ?",
-    )
-    .bind("conv-123")
-    .fetch_one(&ctx.db)
-    .await?;
+    let (updated_state,): (Vec<u8>,) =
+        sqlx::query_as("SELECT group_state FROM mls_groups WHERE conversation_id = ?")
+            .bind("conv-123")
+            .fetch_one(&ctx.db)
+            .await?;
 
     assert_eq!(updated_state, new_state);
 
@@ -235,29 +221,24 @@ async fn test_conversations_storage() -> Result<()> {
     let ctx = TestContext::new().await?;
 
     // Insert a DM conversation
-    sqlx::query(
-        "INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)",
-    )
-    .bind("conv-dm-123")
-    .bind("mls-group-456")
-    .execute(&ctx.db)
-    .await?;
+    sqlx::query("INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)")
+        .bind("conv-dm-123")
+        .bind("mls-group-456")
+        .execute(&ctx.db)
+        .await?;
 
     // Insert a group conversation
-    sqlx::query(
-        "INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)",
-    )
-    .bind("conv-group-789")
-    .bind("mls-group-789")
-    .execute(&ctx.db)
-    .await?;
+    sqlx::query("INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)")
+        .bind("conv-group-789")
+        .bind("mls-group-789")
+        .execute(&ctx.db)
+        .await?;
 
     // Query conversations
-    let convs: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT id, mls_group_id FROM conversations ORDER BY id",
-    )
-    .fetch_all(&ctx.db)
-    .await?;
+    let convs: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, mls_group_id FROM conversations ORDER BY id")
+            .fetch_all(&ctx.db)
+            .await?;
 
     assert_eq!(convs.len(), 2);
     assert_eq!(convs[0].0, "conv-dm-123");

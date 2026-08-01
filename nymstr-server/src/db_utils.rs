@@ -514,7 +514,6 @@ impl DbUtils {
 
     // ===== NAMESPACE TRANSPARENCY LOG (SERVER_SPEC.md) =====
 
-
     /// Queue a mutation into the pool with its inclusion promise.
     /// Returns false if a mutation with the same hash already exists.
     pub async fn insert_fed_mutation(

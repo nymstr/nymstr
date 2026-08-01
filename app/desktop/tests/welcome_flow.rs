@@ -5,8 +5,8 @@
 mod common;
 
 use anyhow::Result;
-use nymstr_app_v2_lib::core::messages::MixnetMessage;
 use common::TestContext;
+use nymstr_app_v2_lib::core::messages::MixnetMessage;
 
 /// Test MLS welcome message format
 #[tokio::test]
@@ -69,7 +69,8 @@ async fn test_welcome_ack_format() -> Result<()> {
     assert_eq!(msg.payload["success"], true);
 
     // Test failure case
-    let msg_fail = MixnetMessage::welcome_ack("new_member", "admin", "group-123", false, "signature");
+    let msg_fail =
+        MixnetMessage::welcome_ack("new_member", "admin", "group-123", false, "signature");
     assert_eq!(msg_fail.payload["success"], false);
 
     Ok(())
@@ -201,16 +202,19 @@ async fn test_mark_welcome_processed() -> Result<()> {
         .await?;
 
     // Mark as processed
-    sqlx::query("UPDATE pending_welcomes SET processed = 1, processed_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(&ctx.db)
-        .await?;
+    sqlx::query(
+        "UPDATE pending_welcomes SET processed = 1, processed_at = datetime('now') WHERE id = ?",
+    )
+    .bind(id)
+    .execute(&ctx.db)
+    .await?;
 
     // Verify
-    let (processed,): (i32,) = sqlx::query_as("SELECT processed FROM pending_welcomes WHERE id = ?")
-        .bind(id)
-        .fetch_one(&ctx.db)
-        .await?;
+    let (processed,): (i32,) =
+        sqlx::query_as("SELECT processed FROM pending_welcomes WHERE id = ?")
+            .bind(id)
+            .fetch_one(&ctx.db)
+            .await?;
 
     assert_eq!(processed, 1);
 
@@ -272,7 +276,8 @@ async fn test_group_invites_storage() -> Result<()> {
 /// Test group join response message format
 #[tokio::test]
 async fn test_group_join_response_format() -> Result<()> {
-    let msg = MixnetMessage::group_join_response("admin", "new_member", "group-123", true, "signature");
+    let msg =
+        MixnetMessage::group_join_response("admin", "new_member", "group-123", true, "signature");
 
     assert_eq!(msg.message_type, "system");
     assert_eq!(msg.action, "groupJoinResponse");

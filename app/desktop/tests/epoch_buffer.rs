@@ -7,10 +7,10 @@ mod common;
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
-use nymstr_app_v2_lib::crypto::mls::epoch_buffer::{
-    EpochAwareBuffer, BufferedMessage, MAX_BUFFER_AGE_SECS, MAX_BUFFER_SIZE, MAX_RETRY_COUNT,
-};
 use common::TestContext;
+use nymstr_app_v2_lib::crypto::mls::epoch_buffer::{
+    BufferedMessage, EpochAwareBuffer, MAX_BUFFER_AGE_SECS, MAX_BUFFER_SIZE, MAX_RETRY_COUNT,
+};
 
 /// Test that messages are correctly queued when they can't be processed
 #[tokio::test]
@@ -20,7 +20,9 @@ async fn test_message_buffering_basic() -> Result<()> {
     buffer.set_username("alice").await;
 
     // Queue a message
-    buffer.queue_message("conv1", "bob", "encrypted_message_b64").await?;
+    buffer
+        .queue_message("conv1", "bob", "encrypted_message_b64")
+        .await?;
 
     // Verify it's in the buffer
     let pending = buffer.get_retry_candidates("conv1").await?;
@@ -106,7 +108,9 @@ async fn test_mark_failed_removes_from_candidates() -> Result<()> {
     buffer.queue_message("conv1", "bob", "msg1").await?;
 
     // Mark as failed
-    buffer.mark_failed("conv1", "msg1", "Exceeded max retries").await?;
+    buffer
+        .mark_failed("conv1", "msg1", "Exceeded max retries")
+        .await?;
 
     // Should no longer appear in retry candidates
     let pending = buffer.get_retry_candidates("conv1").await?;

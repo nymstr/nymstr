@@ -89,7 +89,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     let alice = create_user_with_client("alice")?;
 
     // Alice creates the group
-    let group_info = alice.client.create_mls_group("test-group-lifecycle").await?;
+    let group_info = alice
+        .client
+        .create_mls_group("test-group-lifecycle")
+        .await?;
     let group_id = group_info.mls_group_id.clone();
     let group_id_bytes = base64::engine::general_purpose::STANDARD.decode(&group_id)?;
 
@@ -108,7 +111,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     let bob_key_package = bob.client.generate_key_package()?;
 
     // Alice adds Bob to the group
-    let add_result = alice.client.add_member_to_group(&group_id, &bob_key_package).await?;
+    let add_result = alice
+        .client
+        .add_member_to_group(&group_id, &bob_key_package)
+        .await?;
 
     let epoch = add_result.new_epoch;
     println!("Bob added, epoch now: {}", epoch);
@@ -123,7 +129,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Alice sends a message
     {
         let plaintext = "Hey Bob, welcome to the group!";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         // Bob decrypts Alice's message
         let decrypted = bob.client.decrypt_message(&encrypted).await?;
@@ -136,7 +145,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Bob replies
     {
         let plaintext = "Thanks Alice! Excited to be here.";
-        let encrypted = bob.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = bob
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         // Alice decrypts Bob's message
         let decrypted = alice.client.decrypt_message(&encrypted).await?;
@@ -149,7 +161,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // A few more exchanges
     for i in 1..=2 {
         let msg = format!("Status update #{}", i);
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, msg.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, msg.as_bytes())
+            .await?;
 
         let decrypted = bob.client.decrypt_message(&encrypted).await?;
         assert_eq!(String::from_utf8(decrypted)?, msg);
@@ -165,14 +180,20 @@ async fn test_complete_group_lifecycle() -> Result<()> {
 
     let charlie_key_package = charlie.client.generate_key_package()?;
 
-    let add_result = alice.client.add_member_to_group(&group_id, &charlie_key_package).await?;
+    let add_result = alice
+        .client
+        .add_member_to_group(&group_id, &charlie_key_package)
+        .await?;
 
     // Bob needs to process the commit to stay in sync
     let commit_bytes = add_result.decode_commit_bytes()?;
     let bob_epoch = bob.client.process_commit(&group_id, &commit_bytes)?;
 
     let epoch = add_result.new_epoch;
-    println!("Charlie added, epoch now: {} (Bob's epoch: {})", epoch, bob_epoch);
+    println!(
+        "Charlie added, epoch now: {} (Bob's epoch: {})",
+        epoch, bob_epoch
+    );
     assert_eq!(bob_epoch, epoch);
 
     // Charlie processes welcome
@@ -185,7 +206,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Alice announces Charlie
     {
         let plaintext = "Everyone, please welcome Charlie!";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         let bob_decrypted = bob.client.decrypt_message(&encrypted).await?;
         let charlie_decrypted = charlie.client.decrypt_message(&encrypted).await?;
@@ -200,7 +224,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Bob says hi
     {
         let plaintext = "Hi Charlie! Welcome aboard!";
-        let encrypted = bob.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = bob
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         let alice_decrypted = alice.client.decrypt_message(&encrypted).await?;
         let charlie_decrypted = charlie.client.decrypt_message(&encrypted).await?;
@@ -215,7 +242,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Charlie responds
     {
         let plaintext = "Thanks everyone! Happy to be here.";
-        let encrypted = charlie.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = charlie
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         let alice_decrypted = alice.client.decrypt_message(&encrypted).await?;
         let bob_decrypted = bob.client.decrypt_message(&encrypted).await?;
@@ -235,7 +265,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
 
     // Add Dave
     let dave_key_package = dave.client.generate_key_package()?;
-    let dave_add_result = alice.client.add_member_to_group(&group_id, &dave_key_package).await?;
+    let dave_add_result = alice
+        .client
+        .add_member_to_group(&group_id, &dave_key_package)
+        .await?;
 
     // Existing members process commit
     let commit_bytes = dave_add_result.decode_commit_bytes()?;
@@ -243,12 +276,17 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     charlie.client.process_commit(&group_id, &commit_bytes)?;
 
     // Dave joins
-    dave.client.process_welcome(&dave_add_result.welcome).await?;
+    dave.client
+        .process_welcome(&dave_add_result.welcome)
+        .await?;
     println!("Dave added, epoch now: {}", dave_add_result.new_epoch);
 
     // Add Eve
     let eve_key_package = eve.client.generate_key_package()?;
-    let eve_add_result = alice.client.add_member_to_group(&group_id, &eve_key_package).await?;
+    let eve_add_result = alice
+        .client
+        .add_member_to_group(&group_id, &eve_key_package)
+        .await?;
 
     // Existing members process commit
     let commit_bytes = eve_add_result.decode_commit_bytes()?;
@@ -267,11 +305,26 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Alice sends and everyone else decrypts
     {
         let plaintext = "Group is getting big! 5 members now.";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Alice: {}", plaintext);
     }
@@ -279,11 +332,26 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Bob sends
     {
         let plaintext = "This is exciting!";
-        let encrypted = bob.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = bob
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Bob: {}", plaintext);
     }
@@ -291,11 +359,26 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Charlie sends
     {
         let plaintext = "Let's get started on the project.";
-        let encrypted = charlie.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = charlie
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Charlie: {}", plaintext);
     }
@@ -303,11 +386,26 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Dave sends
     {
         let plaintext = "I'm new here but ready to contribute.";
-        let encrypted = dave.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = dave
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Dave: {}", plaintext);
     }
@@ -315,11 +413,26 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Eve sends
     {
         let plaintext = "Same here! Looking forward to working together.";
-        let encrypted = eve.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = eve
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(bob.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Eve: {}", plaintext);
     }
@@ -330,7 +443,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     let pre_remove_epoch = alice.client.get_group_epoch(&group_id)?;
 
     // Alice removes Bob
-    let remove_result = alice.client.remove_member_from_group(&group_id, "bob").await?;
+    let remove_result = alice
+        .client
+        .remove_member_from_group(&group_id, "bob")
+        .await?;
 
     let epoch = remove_result.new_epoch;
     println!(
@@ -347,12 +463,24 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Alice announces the removal
     {
         let plaintext = "Bob has left the group.";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
         // Remaining members can decrypt
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
 
         message_count += 1;
         println!("Alice: {}", plaintext);
@@ -364,40 +492,88 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Chat continues without Bob
     {
         let plaintext = "Moving forward with the plan.";
-        let encrypted = charlie.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = charlie
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Charlie: {}", plaintext);
     }
 
     {
         let plaintext = "I can help with the implementation.";
-        let encrypted = dave.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = dave
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Dave: {}", plaintext);
     }
 
     {
         let plaintext = "I'll handle the documentation.";
-        let encrypted = eve.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = eve
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Eve: {}", plaintext);
     }
 
     {
         let plaintext = "Great teamwork everyone!";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
         message_count += 1;
         println!("Alice: {}", plaintext);
     }
@@ -408,7 +584,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     let frank = create_user_with_client("frank")?;
 
     let frank_key_package = frank.client.generate_key_package()?;
-    let frank_add_result = alice.client.add_member_to_group(&group_id, &frank_key_package).await?;
+    let frank_add_result = alice
+        .client
+        .add_member_to_group(&group_id, &frank_key_package)
+        .await?;
 
     // Existing members process commit
     let commit_bytes = frank_add_result.decode_commit_bytes()?;
@@ -417,7 +596,10 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     eve.client.process_commit(&group_id, &commit_bytes)?;
 
     // Frank joins
-    frank.client.process_welcome(&frank_add_result.welcome).await?;
+    frank
+        .client
+        .process_welcome(&frank_add_result.welcome)
+        .await?;
     let final_epoch = frank_add_result.new_epoch;
 
     println!("Frank added, epoch now: {}", final_epoch);
@@ -428,12 +610,27 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // Welcome Frank and close out the test
     {
         let plaintext = "Welcome Frank! You're replacing Bob on the project.";
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(frank.client.decrypt_message(&encrypted).await?)?, plaintext);
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(frank.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
 
         message_count += 1;
         println!("Alice: {}", plaintext);
@@ -441,12 +638,27 @@ async fn test_complete_group_lifecycle() -> Result<()> {
 
     {
         let plaintext = "Thanks Alice! I'm ready to get started.";
-        let encrypted = frank.client.encrypt_message(&group_id_bytes, plaintext.as_bytes()).await?;
+        let encrypted = frank
+            .client
+            .encrypt_message(&group_id_bytes, plaintext.as_bytes())
+            .await?;
 
-        assert_eq!(String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?, plaintext);
-        assert_eq!(String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?, plaintext);
+        assert_eq!(
+            String::from_utf8(alice.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(charlie.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(dave.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
+        assert_eq!(
+            String::from_utf8(eve.client.decrypt_message(&encrypted).await?)?,
+            plaintext
+        );
 
         message_count += 1;
         println!("Frank: {}", plaintext);
@@ -465,10 +677,18 @@ async fn test_complete_group_lifecycle() -> Result<()> {
     // - 4: Eve added
     // - 5: Bob removed
     // - 6: Frank added
-    assert!(final_epoch >= 6, "Expected at least 6 epoch changes, got {}", final_epoch);
+    assert!(
+        final_epoch >= 6,
+        "Expected at least 6 epoch changes, got {}",
+        final_epoch
+    );
 
     // Verify message count
-    assert!(message_count >= 15, "Expected at least 15 messages, got {}", message_count);
+    assert!(
+        message_count >= 15,
+        "Expected at least 15 messages, got {}",
+        message_count
+    );
 
     println!("\nGroup lifecycle test completed successfully!");
 
@@ -485,28 +705,43 @@ async fn test_forward_secrecy_after_removal() -> Result<()> {
     let bob = create_user_with_client("bob")?;
 
     // Alice creates group and adds Bob
-    let group_info = alice.client.create_mls_group("forward-secrecy-test").await?;
+    let group_info = alice
+        .client
+        .create_mls_group("forward-secrecy-test")
+        .await?;
     let group_id = group_info.mls_group_id.clone();
     let group_id_bytes = base64::engine::general_purpose::STANDARD.decode(&group_id)?;
 
     let bob_key_package = bob.client.generate_key_package()?;
-    let add_result = alice.client.add_member_to_group(&group_id, &bob_key_package).await?;
+    let add_result = alice
+        .client
+        .add_member_to_group(&group_id, &bob_key_package)
+        .await?;
     bob.client.process_welcome(&add_result.welcome).await?;
 
     // Verify Bob can decrypt messages before removal
     let pre_removal_msg = "Message before removal";
-    let encrypted = alice.client.encrypt_message(&group_id_bytes, pre_removal_msg.as_bytes()).await?;
+    let encrypted = alice
+        .client
+        .encrypt_message(&group_id_bytes, pre_removal_msg.as_bytes())
+        .await?;
     let decrypted = bob.client.decrypt_message(&encrypted).await?;
     assert_eq!(String::from_utf8(decrypted)?, pre_removal_msg);
     println!("Bob successfully decrypted message before removal");
 
     // Alice removes Bob
-    let _remove_result = alice.client.remove_member_from_group(&group_id, "bob").await?;
+    let _remove_result = alice
+        .client
+        .remove_member_from_group(&group_id, "bob")
+        .await?;
     println!("Bob removed from group");
 
     // Alice sends a new message after removal
     let post_removal_msg = "Secret message after Bob was removed";
-    let encrypted_after = alice.client.encrypt_message(&group_id_bytes, post_removal_msg.as_bytes()).await?;
+    let encrypted_after = alice
+        .client
+        .encrypt_message(&group_id_bytes, post_removal_msg.as_bytes())
+        .await?;
 
     // Bob should NOT be able to decrypt the new message
     // His group state is at the old epoch
@@ -529,7 +764,10 @@ async fn test_rapid_member_additions() -> Result<()> {
     println!("\n=== Testing rapid successive member additions ===");
 
     let alice = create_user_with_client("alice")?;
-    let group_info = alice.client.create_mls_group("rapid-additions-test").await?;
+    let group_info = alice
+        .client
+        .create_mls_group("rapid-additions-test")
+        .await?;
     let group_id = group_info.mls_group_id.clone();
 
     let mut members: Vec<TestMlsClient> = vec![];
@@ -541,7 +779,10 @@ async fn test_rapid_member_additions() -> Result<()> {
         let client = create_user_with_client(&username)?;
 
         let key_package = client.client.generate_key_package()?;
-        let add_result = alice.client.add_member_to_group(&group_id, &key_package).await?;
+        let add_result = alice
+            .client
+            .add_member_to_group(&group_id, &key_package)
+            .await?;
 
         // Existing members process commit
         let commit_bytes = add_result.decode_commit_bytes()?;
@@ -561,14 +802,20 @@ async fn test_rapid_member_additions() -> Result<()> {
     // Verify all 6 members (alice + 5 users) can communicate
     let group_id_bytes = base64::engine::general_purpose::STANDARD.decode(&group_id)?;
     let test_msg = "Test message to all members";
-    let encrypted = alice.client.encrypt_message(&group_id_bytes, test_msg.as_bytes()).await?;
+    let encrypted = alice
+        .client
+        .encrypt_message(&group_id_bytes, test_msg.as_bytes())
+        .await?;
 
     for member in &members {
         let decrypted = member.client.decrypt_message(&encrypted).await?;
         assert_eq!(String::from_utf8(decrypted)?, test_msg);
     }
 
-    println!("All {} members can decrypt messages successfully", members.len() + 1);
+    println!(
+        "All {} members can decrypt messages successfully",
+        members.len() + 1
+    );
 
     // Verify epoch advanced correctly (one per addition)
     assert_eq!(epoch, 5, "Expected epoch 5 after 5 additions");
@@ -600,7 +847,10 @@ async fn test_messages_across_epoch_changes() -> Result<()> {
     // Messages at epoch 1
     {
         let msg = format!("Message at epoch {}", epoch);
-        let encrypted = alice.client.encrypt_message(&group_id_bytes, msg.as_bytes()).await?;
+        let encrypted = alice
+            .client
+            .encrypt_message(&group_id_bytes, msg.as_bytes())
+            .await?;
         let decrypted = bob.client.decrypt_message(&encrypted).await?;
         assert_eq!(String::from_utf8(decrypted)?, msg);
         println!("Epoch {}: Alice -> Bob message succeeded", epoch);
@@ -608,8 +858,12 @@ async fn test_messages_across_epoch_changes() -> Result<()> {
 
     // Add Charlie (epoch 2)
     let charlie_kp = charlie.client.generate_key_package()?;
-    let add_charlie = alice.client.add_member_to_group(&group_id, &charlie_kp).await?;
-    bob.client.process_commit(&group_id, &add_charlie.decode_commit_bytes()?)?;
+    let add_charlie = alice
+        .client
+        .add_member_to_group(&group_id, &charlie_kp)
+        .await?;
+    bob.client
+        .process_commit(&group_id, &add_charlie.decode_commit_bytes()?)?;
     charlie.client.process_welcome(&add_charlie.welcome).await?;
     epoch = add_charlie.new_epoch;
     println!("Epoch {}: Charlie joined", epoch);
@@ -617,7 +871,10 @@ async fn test_messages_across_epoch_changes() -> Result<()> {
     // Messages at epoch 2
     {
         let msg = format!("Message at epoch {} from Bob", epoch);
-        let encrypted = bob.client.encrypt_message(&group_id_bytes, msg.as_bytes()).await?;
+        let encrypted = bob
+            .client
+            .encrypt_message(&group_id_bytes, msg.as_bytes())
+            .await?;
 
         let alice_dec = alice.client.decrypt_message(&encrypted).await?;
         let charlie_dec = charlie.client.decrypt_message(&encrypted).await?;
@@ -628,21 +885,32 @@ async fn test_messages_across_epoch_changes() -> Result<()> {
     }
 
     // Remove Bob (epoch 3)
-    let remove_bob = alice.client.remove_member_from_group(&group_id, "bob").await?;
-    charlie.client.process_commit(&group_id, &remove_bob.decode_commit_bytes()?)?;
+    let remove_bob = alice
+        .client
+        .remove_member_from_group(&group_id, "bob")
+        .await?;
+    charlie
+        .client
+        .process_commit(&group_id, &remove_bob.decode_commit_bytes()?)?;
     epoch = remove_bob.new_epoch;
     println!("Epoch {}: Bob removed", epoch);
 
     // Messages at epoch 3 (without Bob)
     {
         let msg = format!("Message at epoch {} (Bob removed)", epoch);
-        let encrypted = charlie.client.encrypt_message(&group_id_bytes, msg.as_bytes()).await?;
+        let encrypted = charlie
+            .client
+            .encrypt_message(&group_id_bytes, msg.as_bytes())
+            .await?;
         let decrypted = alice.client.decrypt_message(&encrypted).await?;
         assert_eq!(String::from_utf8(decrypted)?, msg);
         println!("Epoch {}: Charlie -> Alice message succeeded", epoch);
     }
 
-    println!("\nSuccessfully sent messages across {} epoch changes", epoch);
+    println!(
+        "\nSuccessfully sent messages across {} epoch changes",
+        epoch
+    );
 
     Ok(())
 }

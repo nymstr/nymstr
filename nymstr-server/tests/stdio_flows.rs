@@ -66,7 +66,9 @@ impl StdioServer {
         self.stdin.flush().expect("failed to flush stdin");
 
         let mut line = String::new();
-        self.reader.read_line(&mut line).expect("failed to read response");
+        self.reader
+            .read_line(&mut line)
+            .expect("failed to read response");
         let line = line.trim();
         serde_json::from_str(line)
             .unwrap_or_else(|e| panic!("failed to parse response JSON: {e}\nRaw line: {line:?}"))
@@ -84,21 +86,27 @@ impl Drop for StdioServer {
 fn test_query_nonexistent_user() {
     let mut server = StdioServer::spawn();
 
-    let response = server.send("t1", json!({
-        "type": "message",
-        "action": "query",
-        "sender": "alice",
-        "payload": {
-            "username": "nonexistent"
-        }
-    }));
+    let response = server.send(
+        "t1",
+        json!({
+            "type": "message",
+            "action": "query",
+            "sender": "alice",
+            "payload": {
+                "username": "nonexistent"
+            }
+        }),
+    );
 
     assert_eq!(response["replyTag"], "stdio:t1");
     let msg = &response["message"];
     // Should get a queryResponse back
     assert!(
         msg["action"].as_str().unwrap().contains("query")
-            || msg["content"].as_str().map(|s| s.contains("not found")).unwrap_or(false),
+            || msg["content"]
+                .as_str()
+                .map(|s| s.contains("not found"))
+                .unwrap_or(false),
         "Expected query response, got: {}",
         msg
     );
@@ -109,19 +117,25 @@ fn test_reply_tag_correlation() {
     let mut server = StdioServer::spawn();
 
     // Send two queries with different tags
-    let r1 = server.send("tag-alpha", json!({
-        "type": "message",
-        "action": "query",
-        "sender": "alice",
-        "payload": { "username": "user1" }
-    }));
+    let r1 = server.send(
+        "tag-alpha",
+        json!({
+            "type": "message",
+            "action": "query",
+            "sender": "alice",
+            "payload": { "username": "user1" }
+        }),
+    );
 
-    let r2 = server.send("tag-beta", json!({
-        "type": "message",
-        "action": "query",
-        "sender": "bob",
-        "payload": { "username": "user2" }
-    }));
+    let r2 = server.send(
+        "tag-beta",
+        json!({
+            "type": "message",
+            "action": "query",
+            "sender": "bob",
+            "payload": { "username": "user2" }
+        }),
+    );
 
     // Each response should have its own reply tag
     assert_eq!(r1["replyTag"], "stdio:tag-alpha");
@@ -133,15 +147,18 @@ fn test_register_challenge_flow() {
     let mut server = StdioServer::spawn();
 
     // Step 1: Send register request
-    let response = server.send("reg1", json!({
-        "type": "message",
-        "action": "register",
-        "sender": "testuser",
-        "payload": {
-            "username": "testuser",
-            "publicKey": "dummy-key-for-test"
-        }
-    }));
+    let response = server.send(
+        "reg1",
+        json!({
+            "type": "message",
+            "action": "register",
+            "sender": "testuser",
+            "payload": {
+                "username": "testuser",
+                "publicKey": "dummy-key-for-test"
+            }
+        }),
+    );
 
     assert_eq!(response["replyTag"], "stdio:reg1");
     let msg = &response["message"];
@@ -160,10 +177,13 @@ fn test_legacy_format_query() {
     let mut server = StdioServer::spawn();
 
     // Test legacy format (no "type" field)
-    let response = server.send("legacy1", json!({
-        "action": "query",
-        "username": "nobody"
-    }));
+    let response = server.send(
+        "legacy1",
+        json!({
+            "action": "query",
+            "username": "nobody"
+        }),
+    );
 
     assert_eq!(response["replyTag"], "stdio:legacy1");
     // Should still get a response

@@ -1,17 +1,17 @@
 use crate::db_utils::{DbUtils, QueryResult};
-use nymstr_crypto::ServerKeyManager;
 use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
-use crate::transport::{ReplyTag, ReplySender};
+use crate::transport::{ReplySender, ReplyTag};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use hmac::{Hmac, Mac};
+use nym_sdk::mixnet::{ReceivedReplySurbsMap, ReconstructedMessage};
 use nymstr_common::rate_limiter::RateLimiter;
 use nymstr_common::validation;
-use nym_sdk::mixnet::{ReconstructedMessage, ReceivedReplySurbsMap};
+use nymstr_crypto::ServerKeyManager;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Instant;
 use uuid::Uuid;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
 
 /// Handler for incoming mixnet messages and command processing.
 pub struct MessageUtils {
@@ -210,12 +210,23 @@ impl MessageUtils {
                             .await
                     }
                     "send" => {
-                        self.handle_send_unified(payload, sender_tag, sender_username, recipient_username, signature)
-                            .await
+                        self.handle_send_unified(
+                            payload,
+                            sender_tag,
+                            sender_username,
+                            recipient_username,
+                            signature,
+                        )
+                        .await
                     }
                     "fetchPending" => {
-                        self.handle_fetch_pending_unified(payload, sender_tag, sender_username, signature)
-                            .await
+                        self.handle_fetch_pending_unified(
+                            payload,
+                            sender_tag,
+                            sender_username,
+                            signature,
+                        )
+                        .await
                     }
                     "keyPackageRequest" => {
                         self.handle_key_package_request_unified(
@@ -253,15 +264,18 @@ impl MessageUtils {
                             .await
                     }
                     "publishKeyPackage" => {
-                        self.handle_publish_key_package(payload, sender_tag, sender_username, signature)
-                            .await
+                        self.handle_publish_key_package(
+                            payload,
+                            sender_tag,
+                            sender_username,
+                            signature,
+                        )
+                        .await
                     }
                     "fetchKeyPackageChallenge" => {
                         self.handle_fetch_kp_challenge(payload, sender_tag).await
                     }
-                    "fetchKeyPackage" => {
-                        self.handle_fetch_key_package(payload, sender_tag).await
-                    }
+                    "fetchKeyPackage" => self.handle_fetch_key_package(payload, sender_tag).await,
                     // Namespace transparency-log actions (SERVER_SPEC.md §8).
                     "submitMutation" => {
                         self.handle_submit_mutation(payload, sender_tag, sender_username)
@@ -387,8 +401,13 @@ impl MessageUtils {
                         "publicKey": public_key
                     })
                     .to_string();
-                    self.send_encapsulated_reply(&sender_tag, reply, "queryResponse", Some("query"))
-                        .await;
+                    self.send_encapsulated_reply(
+                        &sender_tag,
+                        reply,
+                        "queryResponse",
+                        Some("query"),
+                    )
+                    .await;
                 }
                 Some(QueryResult::Group {
                     group_id,
@@ -406,8 +425,13 @@ impl MessageUtils {
                         "description": description
                     })
                     .to_string();
-                    self.send_encapsulated_reply(&sender_tag, reply, "queryResponse", Some("query"))
-                        .await;
+                    self.send_encapsulated_reply(
+                        &sender_tag,
+                        reply,
+                        "queryResponse",
+                        Some("query"),
+                    )
+                    .await;
                 }
                 None => {
                     self.send_encapsulated_reply(
@@ -766,8 +790,13 @@ impl MessageUtils {
             if let Some(spk) = content.get("senderPublicKey") {
                 forward["senderPublicKey"] = spk.clone();
             }
-            self.send_encapsulated_reply(&tag, forward.to_string(), "incomingMessage", Some("chat"))
-                .await;
+            self.send_encapsulated_reply(
+                &tag,
+                forward.to_string(),
+                "incomingMessage",
+                Some("chat"),
+            )
+            .await;
         }
 
         self.send_encapsulated_reply(&sender_tag, "success".into(), "sendResponse", Some("chat"))
@@ -986,11 +1015,7 @@ impl MessageUtils {
     }
 
     /// Handle group registration response (step 2: verify signature)
-    async fn handle_register_group_response(
-        &mut self,
-        data: &Value,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_register_group_response(&mut self, data: &Value, sender_tag: ReplyTag) {
         let signature = data.get("signature").and_then(Value::as_str);
 
         if signature.is_none() {
@@ -1423,8 +1448,13 @@ impl MessageUtils {
         } else {
             log::warn!("Registration response missing signature field");
             let response_payload = json!({"result": "error", "context": "registration", "message": "missing signature"});
-            self.send_unified_reply(&sender_tag, response_payload, "challengeResponse", "unknown")
-                .await;
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "challengeResponse",
+                "unknown",
+            )
+            .await;
         }
     }
 
@@ -1552,8 +1582,13 @@ impl MessageUtils {
         } else {
             let response_payload =
                 json!({"result": "error", "context": "login", "message": "missing signature"});
-            self.send_unified_reply(&sender_tag, response_payload, "challengeResponse", "unknown")
-                .await;
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "challengeResponse",
+                "unknown",
+            )
+            .await;
         }
     }
 
@@ -1594,10 +1629,7 @@ impl MessageUtils {
         let sender_data = match self.db.get_user_by_username(sender_username).await {
             Ok(Some(data)) => data,
             Ok(None) => {
-                log::warn!(
-                    "Send rejected: sender {} not registered",
-                    sender_username
-                );
+                log::warn!("Send rejected: sender {} not registered", sender_username);
                 let response_payload =
                     json!({"status": "error", "message": "sender not registered"});
                 self.send_unified_reply(
@@ -1611,8 +1643,7 @@ impl MessageUtils {
             }
             Err(e) => {
                 log::error!("Send: database error looking up {}: {}", sender_username, e);
-                let response_payload =
-                    json!({"status": "error", "message": "database error"});
+                let response_payload = json!({"status": "error", "message": "database error"});
                 self.send_unified_reply(
                     &sender_tag,
                     response_payload,
@@ -1630,12 +1661,8 @@ impl MessageUtils {
         let signature = match signature {
             Some(sig) => sig,
             None => {
-                log::warn!(
-                    "Send from {} rejected: missing signature",
-                    sender_username
-                );
-                let response_payload =
-                    json!({"status": "error", "message": "missing signature"});
+                log::warn!("Send from {} rejected: missing signature", sender_username);
+                let response_payload = json!({"status": "error", "message": "missing signature"});
                 self.send_unified_reply(
                     &sender_tag,
                     response_payload,
@@ -1652,12 +1679,8 @@ impl MessageUtils {
             .crypto
             .verify_signature(public_key, &payload_str, signature)
         {
-            log::warn!(
-                "Send from {} rejected: invalid signature",
-                sender_username
-            );
-            let response_payload =
-                json!({"status": "error", "message": "invalid signature"});
+            log::warn!("Send from {} rejected: invalid signature", sender_username);
+            let response_payload = json!({"status": "error", "message": "invalid signature"});
             self.send_unified_reply(
                 &sender_tag,
                 response_payload,
@@ -1683,7 +1706,10 @@ impl MessageUtils {
             let recipient = match recipient_username {
                 Some(r) if !r.is_empty() => r,
                 _ => {
-                    log::error!("No recipient specified in message envelope for MLS send from {}", sender_username);
+                    log::error!(
+                        "No recipient specified in message envelope for MLS send from {}",
+                        sender_username
+                    );
                     let response_payload =
                         json!({"status": "error", "message": "missing recipient field"});
                     self.send_unified_reply(
@@ -1697,59 +1723,58 @@ impl MessageUtils {
                 }
             };
 
-                // Check recipient exists before persisting
-                if self
-                    .db
-                    .get_user_by_username(recipient)
+            // Check recipient exists before persisting
+            if self
+                .db
+                .get_user_by_username(recipient)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                log::info!("Recipient {} not found in database", recipient);
+                let response_payload = json!({"status": "error", "message": "recipient not found"});
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "sendResponse",
+                    sender_username,
+                )
+                .await;
+            } else {
+                // Persist-then-relay: message is safe in DB, best-effort SURB delivery
+                match self
+                    .relay_with_persistence(recipient, sender_username, payload, "send")
                     .await
-                    .ok()
-                    .flatten()
-                    .is_none()
                 {
-                    log::info!("Recipient {} not found in database", recipient);
-                    let response_payload =
-                        json!({"status": "error", "message": "recipient not found"});
-                    self.send_unified_reply(
-                        &sender_tag,
-                        response_payload,
-                        "sendResponse",
-                        sender_username,
-                    )
-                    .await;
-                } else {
-                    // Persist-then-relay: message is safe in DB, best-effort SURB delivery
-                    match self
-                        .relay_with_persistence(recipient, sender_username, payload, "send")
-                        .await
-                    {
-                        Ok(_pending_id) => {
-                            let response_payload = json!({
-                                "status": "sent",
-                                "recipient": recipient,
-                                "message": "Message accepted for delivery"
-                            });
-                            self.send_unified_reply(
-                                &sender_tag,
-                                response_payload,
-                                "sendResponse",
-                                sender_username,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            log::error!("Failed to relay message to {}: {}", recipient, e);
-                            let response_payload =
-                                json!({"status": "error", "message": "failed to queue message"});
-                            self.send_unified_reply(
-                                &sender_tag,
-                                response_payload,
-                                "sendResponse",
-                                sender_username,
-                            )
-                            .await;
-                        }
+                    Ok(_pending_id) => {
+                        let response_payload = json!({
+                            "status": "sent",
+                            "recipient": recipient,
+                            "message": "Message accepted for delivery"
+                        });
+                        self.send_unified_reply(
+                            &sender_tag,
+                            response_payload,
+                            "sendResponse",
+                            sender_username,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to relay message to {}: {}", recipient, e);
+                        let response_payload =
+                            json!({"status": "error", "message": "failed to queue message"});
+                        self.send_unified_reply(
+                            &sender_tag,
+                            response_payload,
+                            "sendResponse",
+                            sender_username,
+                        )
+                        .await;
                     }
                 }
+            }
         } else {
             let response_payload =
                 json!({"status": "error", "message": "missing conversation_id or mls_message"});
@@ -1771,10 +1796,7 @@ impl MessageUtils {
         sender_tag: ReplyTag,
         recipient_username: Option<&str>,
     ) {
-        log::info!(
-            "Received sealed send from sender_tag={:?}",
-            sender_tag
-        );
+        log::info!("Received sealed send from sender_tag={:?}", sender_tag);
 
         // Rate limit by sender_tag (anonymous, but throttled)
         let rate_key = sender_tag.to_string();
@@ -1787,13 +1809,8 @@ impl MessageUtils {
                 "status": "error",
                 "message": "rate limit exceeded, please try again later"
             });
-            self.send_unified_reply(
-                &sender_tag,
-                response_payload,
-                "sendResponse",
-                "__sealed__",
-            )
-            .await;
+            self.send_unified_reply(&sender_tag, response_payload, "sendResponse", "__sealed__")
+                .await;
             return;
         }
 
@@ -1851,13 +1868,8 @@ impl MessageUtils {
                 "status": "error",
                 "message": "recipient not found"
             });
-            self.send_unified_reply(
-                &sender_tag,
-                response_payload,
-                "sendResponse",
-                "__sealed__",
-            )
-            .await;
+            self.send_unified_reply(&sender_tag, response_payload, "sendResponse", "__sealed__")
+                .await;
             return;
         }
 
@@ -1982,7 +1994,8 @@ impl MessageUtils {
         // Fetch pending messages from database
         match self.db.get_pending_messages(sender_username).await {
             Ok(messages) => {
-                let message_ids: Vec<String> = messages.iter().map(|(id, _, _, _, _)| id.clone()).collect();
+                let message_ids: Vec<String> =
+                    messages.iter().map(|(id, _, _, _, _)| id.clone()).collect();
                 let message_list: Vec<Value> = messages
                     .iter()
                     .map(|(id, sender, payload_str, action, created_at)| {
@@ -2076,7 +2089,11 @@ impl MessageUtils {
                     );
                 }
                 Err(e) => {
-                    log::error!("Failed to relay key package request to {}: {}", recipient, e);
+                    log::error!(
+                        "Failed to relay key package request to {}: {}",
+                        recipient,
+                        e
+                    );
                     let error_payload = json!({
                         "status": "error",
                         "message": format!("Failed to relay key package request: {}", e)
@@ -2261,27 +2278,31 @@ impl MessageUtils {
         }
 
         // Look up user and verify signature
-        let (public_key, _old_sender_tag) = match self.db.get_user_by_username(sender_username).await {
-            Ok(Some((_username, public_key, old_tag))) => (public_key, old_tag),
-            Ok(None) => {
-                log::warn!("Ping from {} rejected: user not found", sender_username);
-                let response_payload = json!({"status": "error", "error": "user_not_found"});
-                self.send_unified_reply(&sender_tag, response_payload, "pong", sender_username)
-                    .await;
-                return;
-            }
-            Err(e) => {
-                log::error!("Ping from {} rejected: DB error: {}", sender_username, e);
-                let response_payload = json!({"status": "error", "error": "internal_error"});
-                self.send_unified_reply(&sender_tag, response_payload, "pong", sender_username)
-                    .await;
-                return;
-            }
-        };
+        let (public_key, _old_sender_tag) =
+            match self.db.get_user_by_username(sender_username).await {
+                Ok(Some((_username, public_key, old_tag))) => (public_key, old_tag),
+                Ok(None) => {
+                    log::warn!("Ping from {} rejected: user not found", sender_username);
+                    let response_payload = json!({"status": "error", "error": "user_not_found"});
+                    self.send_unified_reply(&sender_tag, response_payload, "pong", sender_username)
+                        .await;
+                    return;
+                }
+                Err(e) => {
+                    log::error!("Ping from {} rejected: DB error: {}", sender_username, e);
+                    let response_payload = json!({"status": "error", "error": "internal_error"});
+                    self.send_unified_reply(&sender_tag, response_payload, "pong", sender_username)
+                        .await;
+                    return;
+                }
+            };
 
         // Verify PGP signature over "ping:{username}:{timestamp}"
         let sign_content = format!("ping:{}:{}", sender_username, timestamp);
-        if !self.crypto.verify_signature(&public_key, &sign_content, signature) {
+        if !self
+            .crypto
+            .verify_signature(&public_key, &sign_content, signature)
+        {
             log::warn!("Ping from {} rejected: invalid signature", sender_username);
             let response_payload = json!({"status": "error", "error": "invalid_signature"});
             self.send_unified_reply(&sender_tag, response_payload, "pong", sender_username)
@@ -2350,7 +2371,11 @@ impl MessageUtils {
                 }
             }
             Err(e) => {
-                log::error!("Failed to fetch pending messages for {}: {}", sender_username, e);
+                log::error!(
+                    "Failed to fetch pending messages for {}: {}",
+                    sender_username,
+                    e
+                );
             }
         }
     }
@@ -2367,7 +2392,10 @@ impl MessageUtils {
         signature: Option<&str>,
     ) {
         let pending_ids: Vec<String> = match payload.get("pendingIds").and_then(|v| v.as_array()) {
-            Some(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+            Some(arr) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
             None => {
                 log::warn!("ACK from {} missing pendingIds array", sender_username);
                 return;
@@ -2384,8 +2412,13 @@ impl MessageUtils {
             None => {
                 log::warn!("ACK from {} rejected: missing signature", sender_username);
                 let response_payload = json!({"status": "error", "message": "missing signature"});
-                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
-                    .await;
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "ackResponse",
+                    sender_username,
+                )
+                .await;
                 return;
             }
         };
@@ -2395,8 +2428,13 @@ impl MessageUtils {
             None => {
                 log::warn!("ACK from {} rejected: missing timestamp", sender_username);
                 let response_payload = json!({"status": "error", "message": "missing timestamp"});
-                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
-                    .await;
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "ackResponse",
+                    sender_username,
+                )
+                .await;
                 return;
             }
         };
@@ -2410,8 +2448,13 @@ impl MessageUtils {
                 now - timestamp
             );
             let response_payload = json!({"status": "error", "message": "stale timestamp"});
-            self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
-                .await;
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "ackResponse",
+                sender_username,
+            )
+            .await;
             return;
         }
 
@@ -2421,8 +2464,13 @@ impl MessageUtils {
             Ok(None) => {
                 log::warn!("ACK from {} rejected: user not found", sender_username);
                 let response_payload = json!({"status": "error", "message": "user not registered"});
-                self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
-                    .await;
+                self.send_unified_reply(
+                    &sender_tag,
+                    response_payload,
+                    "ackResponse",
+                    sender_username,
+                )
+                .await;
                 return;
             }
             Err(e) => {
@@ -2440,13 +2488,15 @@ impl MessageUtils {
             .crypto
             .verify_signature(public_key, &message_to_verify, signature)
         {
-            log::warn!(
-                "ACK from {} rejected: invalid signature",
-                sender_username
-            );
+            log::warn!("ACK from {} rejected: invalid signature", sender_username);
             let response_payload = json!({"status": "error", "message": "invalid signature"});
-            self.send_unified_reply(&sender_tag, response_payload, "ackResponse", sender_username)
-                .await;
+            self.send_unified_reply(
+                &sender_tag,
+                response_payload,
+                "ackResponse",
+                sender_username,
+            )
+            .await;
             return;
         }
 
@@ -2613,7 +2663,9 @@ impl MessageUtils {
 
                 log::info!(
                     "SURB delivery (action={}) from {} to {}",
-                    action, sender, recipient
+                    action,
+                    sender,
+                    recipient
                 );
 
                 return Ok("surb_delivered".to_string());
@@ -2621,12 +2673,14 @@ impl MessageUtils {
 
             log::info!(
                 "SURBs exhausted for {}, persisting message (action={})",
-                recipient, action
+                recipient,
+                action
             );
         } else {
             log::info!(
                 "No sender_tag for {}, persisting message (action={})",
-                recipient, action
+                recipient,
+                action
             );
         }
 
@@ -2640,7 +2694,10 @@ impl MessageUtils {
 
         log::info!(
             "Persisted pending message {} (action={}) from {} to {}",
-            pending_id, action, sender, recipient
+            pending_id,
+            action,
+            sender,
+            recipient
         );
 
         Ok(pending_id)
@@ -2690,7 +2747,10 @@ impl MessageUtils {
                 return Ok("surb_delivered".to_string());
             }
 
-            log::info!("SURBs exhausted for {}, persisting sealed message", recipient);
+            log::info!(
+                "SURBs exhausted for {}, persisting sealed message",
+                recipient
+            );
         } else {
             log::info!("No sender_tag for {}, persisting sealed message", recipient);
         }
@@ -2703,7 +2763,11 @@ impl MessageUtils {
             .await
             .map_err(|e| format!("Failed to queue sealed pending message: {}", e))?;
 
-        log::info!("Persisted sealed pending message {} to {}", pending_id, recipient);
+        log::info!(
+            "Persisted sealed pending message {} to {}",
+            pending_id,
+            recipient
+        );
         Ok(pending_id)
     }
 
@@ -2777,10 +2841,16 @@ impl MessageUtils {
         // Verify signature over "publishKeyPackage:{username}:{keyPackage_b64}" per protocol
         let public_key = &user_data.1;
         if let Some(sig) = signature {
-            let key_package_b64 = payload.get("keyPackage").and_then(Value::as_str).unwrap_or("");
+            let key_package_b64 = payload
+                .get("keyPackage")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let sign_content = format!("publishKeyPackage:{}:{}", sender_username, key_package_b64);
             if !self.crypto.verify_signature(public_key, &sign_content, sig) {
-                log::warn!("publishKeyPackage: invalid signature from {}", sender_username);
+                log::warn!(
+                    "publishKeyPackage: invalid signature from {}",
+                    sender_username
+                );
                 self.send_unified_reply(
                     &sender_tag,
                     json!({"status": "error", "message": "invalid signature"}),
@@ -2791,7 +2861,10 @@ impl MessageUtils {
                 return;
             }
         } else {
-            log::warn!("publishKeyPackage: missing signature from {}", sender_username);
+            log::warn!(
+                "publishKeyPackage: missing signature from {}",
+                sender_username
+            );
             self.send_unified_reply(
                 &sender_tag,
                 json!({"status": "error", "message": "missing signature"}),
@@ -2882,11 +2955,7 @@ impl MessageUtils {
         .await;
     }
 
-    async fn handle_fetch_kp_challenge(
-        &mut self,
-        payload: &Value,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_fetch_kp_challenge(&mut self, payload: &Value, sender_tag: ReplyTag) {
         let username = match payload.get("username").and_then(Value::as_str) {
             Some(v) => v,
             None => {
@@ -2927,7 +2996,11 @@ impl MessageUtils {
                 .queue_pending_message(username, "__system__", &notification, "keyPackageNeeded")
                 .await
             {
-                log::warn!("Failed to queue keyPackageNeeded notification for {}: {}", username, e);
+                log::warn!(
+                    "Failed to queue keyPackageNeeded notification for {}: {}",
+                    username,
+                    e
+                );
             }
 
             self.send_unified_reply(
@@ -2994,11 +3067,7 @@ impl MessageUtils {
         .await;
     }
 
-    async fn handle_fetch_key_package(
-        &mut self,
-        payload: &Value,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_fetch_key_package(&mut self, payload: &Value, sender_tag: ReplyTag) {
         // Extract required fields
         let username = match payload.get("username").and_then(Value::as_str) {
             Some(v) => v,
@@ -3049,15 +3118,17 @@ impl MessageUtils {
             .as_secs();
 
         type HmacSha256 = Hmac<Sha256>;
-        let challenge_valid = [now / 300, (now / 300).saturating_sub(1)].iter().any(|&window| {
-            let hmac_message = format!("{}{}", username, window);
-            let mut mac = HmacSha256::new_from_slice(self.client_id.as_bytes())
-                .expect("HMAC accepts any key length");
-            mac.update(hmac_message.as_bytes());
-            let result = mac.finalize();
-            let expected = BASE64.encode(result.into_bytes());
-            expected == challenge
-        });
+        let challenge_valid = [now / 300, (now / 300).saturating_sub(1)]
+            .iter()
+            .any(|&window| {
+                let hmac_message = format!("{}{}", username, window);
+                let mut mac = HmacSha256::new_from_slice(self.client_id.as_bytes())
+                    .expect("HMAC accepts any key length");
+                mac.update(hmac_message.as_bytes());
+                let result = mac.finalize();
+                let expected = BASE64.encode(result.into_bytes());
+                expected == challenge
+            });
 
         if !challenge_valid {
             log::warn!("fetchKeyPackage: invalid challenge for {}", username);

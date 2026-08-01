@@ -1,3 +1,5 @@
+use bip39::{Language, Mnemonic};
+use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
 use nymstr_crypto::ServerKeyManager;
 use nymstr_server::db_utils::DbUtils;
 use nymstr_server::env_loader::load_env;
@@ -5,8 +7,6 @@ use nymstr_server::federation_driver::{spawn_epoch_timer, NamespaceLog, DEFAULT_
 use nymstr_server::log_config::init_logging;
 use nymstr_server::message_utils::MessageUtils;
 use nymstr_server::transport::{NymReplySender, ReplyTag, StdioReplySender};
-use bip39::{Language, Mnemonic};
-use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;

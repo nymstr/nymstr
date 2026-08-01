@@ -10,6 +10,8 @@
 //!   `{"status": "error", "message": ...}` in the response payload.
 //! - All hashes are lowercase hex; Merkle paths are arrays of hex strings.
 
+use crate::message_utils::MessageUtils;
+use crate::transport::ReplyTag;
 use nymstr_federation::canonical::to_canonical_json;
 use nymstr_federation::entry::{validate_key, DirectoryEntry};
 use nymstr_federation::merkle::{self, Hash};
@@ -18,8 +20,6 @@ use nymstr_federation::node::{
     node_id_for, witness_signing_payload, ForkCertificate, SignedTreeHead, WitnessSignature,
 };
 use nymstr_federation::{hash_hex, labels};
-use crate::message_utils::MessageUtils;
-use crate::transport::ReplyTag;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -1018,7 +1018,11 @@ impl MessageUtils {
         };
         // The subject key must match the certificate's claimed node id, and
         // the certificate must verify self-contained (spec §12.2).
-        if node_id_for(node_pk) != cert.node_id || cert.verify(node_pk, &nymstr_federation::PgpVerifier).is_err() {
+        if node_id_for(node_pk) != cert.node_id
+            || cert
+                .verify(node_pk, &nymstr_federation::PgpVerifier)
+                .is_err()
+        {
             self.send_unified_reply(
                 &sender_tag,
                 error_payload("invalid conflict certificate"),

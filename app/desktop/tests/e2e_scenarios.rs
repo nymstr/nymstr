@@ -5,8 +5,8 @@
 mod common;
 
 use anyhow::Result;
-use nymstr_app_v2_lib::core::messages::MixnetMessage;
 use common::TestContext;
+use nymstr_app_v2_lib::core::messages::MixnetMessage;
 
 /// Test complete registration flow message sequence
 #[tokio::test]
@@ -23,11 +23,13 @@ async fn test_registration_message_sequence() -> Result<()> {
     assert_eq!(challenge_msg.payload["nonce"], "nonce123");
 
     // 3. Client responds with signed nonce
-    let response_msg = MixnetMessage::challenge_response("alice", "server", "signed_nonce", "registration");
+    let response_msg =
+        MixnetMessage::challenge_response("alice", "server", "signed_nonce", "registration");
     assert_eq!(response_msg.action, "registrationResponse");
 
     // 4. Server confirms registration
-    let confirm_msg = MixnetMessage::registration_response("server", "alice", "success", "registration");
+    let confirm_msg =
+        MixnetMessage::registration_response("server", "alice", "success", "registration");
     assert_eq!(confirm_msg.action, "challengeResponse");
     assert_eq!(confirm_msg.payload["result"], "success");
 
@@ -59,11 +61,7 @@ async fn test_dm_handshake_flow() -> Result<()> {
     assert_eq!(query_resp.action, "queryResponse");
 
     // 3. Alice requests Bob's key package
-    let kp_request = MixnetMessage::key_package_request(
-        "alice",
-        "bob",
-        "signature",
-    );
+    let kp_request = MixnetMessage::key_package_request("alice", "bob", "signature");
     assert_eq!(kp_request.action, "keyPackageRequest");
 
     // 4. Bob responds with his key package
@@ -103,12 +101,8 @@ async fn test_group_join_flow() -> Result<()> {
     assert_eq!(invite_msg.action, "groupInvite");
 
     // 2. Admin requests user's key package
-    let kp_request = MixnetMessage::key_package_for_group(
-        "admin",
-        "new_member",
-        "group-123",
-        "signature",
-    );
+    let kp_request =
+        MixnetMessage::key_package_for_group("admin", "new_member", "group-123", "signature");
     assert_eq!(kp_request.action, "keyPackageForGroup");
 
     // 3. User provides key package
@@ -136,13 +130,7 @@ async fn test_group_join_flow() -> Result<()> {
     assert_eq!(welcome_msg.action, "mlsWelcome");
 
     // 5. User acknowledges
-    let ack_msg = MixnetMessage::welcome_ack(
-        "new_member",
-        "admin",
-        "group-123",
-        true,
-        "signature",
-    );
+    let ack_msg = MixnetMessage::welcome_ack("new_member", "admin", "group-123", true, "signature");
     assert_eq!(ack_msg.action, "welcomeAck");
 
     Ok(())
@@ -162,11 +150,7 @@ async fn test_group_message_flow() -> Result<()> {
     assert_eq!(register_msg.action, "register");
 
     // 2. User sends encrypted group message
-    let send_msg = MixnetMessage::send_group(
-        "alice",
-        "mls_encrypted_message",
-        "signature",
-    );
+    let send_msg = MixnetMessage::send_group("alice", "mls_encrypted_message", "signature");
     assert_eq!(send_msg.action, "sendGroup");
 
     // 3. Other users fetch messages
@@ -192,12 +176,11 @@ async fn test_registration_db_state() -> Result<()> {
     assert_eq!(count, 1);
 
     // Query the user
-    let user: (String, String) = sqlx::query_as(
-        "SELECT username, public_key FROM users WHERE username = ?",
-    )
-    .bind("alice")
-    .fetch_one(&ctx.db)
-    .await?;
+    let user: (String, String) =
+        sqlx::query_as("SELECT username, public_key FROM users WHERE username = ?")
+            .bind("alice")
+            .fetch_one(&ctx.db)
+            .await?;
 
     assert_eq!(user.0, "alice");
     assert_eq!(user.1, "pk_alice");
@@ -214,13 +197,11 @@ async fn test_conversation_lifecycle() -> Result<()> {
     common::seed_users(&ctx.db, &[("alice", "pk_alice"), ("bob", "pk_bob")]).await?;
 
     // 2. Create conversation
-    sqlx::query(
-        "INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)",
-    )
-    .bind("conv-alice-bob")
-    .bind("mls-group-123")
-    .execute(&ctx.db)
-    .await?;
+    sqlx::query("INSERT INTO conversations (id, mls_group_id) VALUES (?, ?)")
+        .bind("conv-alice-bob")
+        .bind("mls-group-123")
+        .execute(&ctx.db)
+        .await?;
 
     // 3. Store MLS group state
     sqlx::query("INSERT INTO mls_groups (conversation_id, group_state) VALUES (?, ?)")
@@ -291,12 +272,10 @@ async fn test_epoch_buffer_integration() -> Result<()> {
     assert_eq!(pending.0, 3);
 
     // Mark one as processed
-    sqlx::query(
-        "UPDATE pending_mls_messages SET processed = 1 WHERE mls_message_b64 = ?",
-    )
-    .bind("mls_msg_1")
-    .execute(&ctx.db)
-    .await?;
+    sqlx::query("UPDATE pending_mls_messages SET processed = 1 WHERE mls_message_b64 = ?")
+        .bind("mls_msg_1")
+        .execute(&ctx.db)
+        .await?;
 
     let pending: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM pending_mls_messages WHERE processed = 0 AND failed = 0",
@@ -326,11 +305,7 @@ async fn test_multi_user_group() -> Result<()> {
 
     // Create group memberships
     let server = "group-server-1";
-    let members = vec![
-        ("alice", "admin"),
-        ("bob", "member"),
-        ("charlie", "member"),
-    ];
+    let members = vec![("alice", "admin"), ("bob", "member"), ("charlie", "member")];
 
     for (user, role) in members {
         sqlx::query(
@@ -395,7 +370,10 @@ async fn test_message_serialization_roundtrip() -> Result<()> {
     assert_eq!(deserialized.sender, original.sender);
     assert_eq!(deserialized.recipient, original.recipient);
     assert_eq!(deserialized.signature, original.signature);
-    assert_eq!(deserialized.payload["conversation_id"], original.payload["conversation_id"]);
+    assert_eq!(
+        deserialized.payload["conversation_id"],
+        original.payload["conversation_id"]
+    );
 
     Ok(())
 }
