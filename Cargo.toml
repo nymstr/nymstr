@@ -4,6 +4,7 @@ members = [
     "crates/nymstr-common",
     "crates/nymstr-crypto",
     "crates/nymstr-discovery",
+    "crates/nymstr-federation",
     "crates/nymstr-transport",
     "nymstr-server",
     "nymstr-group",

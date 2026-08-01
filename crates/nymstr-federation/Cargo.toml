@@ -1,0 +1,18 @@
+[package]
+name = "nymstr-federation"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Transparency-log core for the Nymstr namespace directory (SERVER_SPEC.md)"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+nymstr-crypto = { path = "../nymstr-crypto" }
+
+[dev-dependencies]
+tempfile = "3"
