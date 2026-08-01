@@ -1,7 +1,7 @@
 //! Test harness: in-process server + clients with real crypto.
 
-use nymstr_crypto::{SecurePassphrase, ServerKeyManager};
 use nymstr_crypto::mls::MlsClient;
+use nymstr_crypto::{SecurePassphrase, ServerKeyManager};
 use nymstr_transport::{CapturingReplySender, ReplyTag};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -21,8 +21,7 @@ impl TestClient {
     /// Create a new test client with PGP keys.
     pub fn new(username: &str, temp_dir: &Path) -> Self {
         let keys_dir = temp_dir.join(format!("{}_keys", username));
-        let key_manager =
-            ServerKeyManager::new(keys_dir, "test-password".into()).unwrap();
+        let key_manager = ServerKeyManager::new(keys_dir, "test-password".into()).unwrap();
         let public_key_armored = key_manager.generate_key_pair(username).unwrap();
         let tag = ReplyTag::Stdio(username.to_string());
 
@@ -56,12 +55,16 @@ impl TestClient {
 
     /// Get a reference to the MLS client.
     pub fn mls(&self) -> &MlsClient {
-        self.mls_client.as_ref().expect("MLS not initialized — call init_mls() first")
+        self.mls_client
+            .as_ref()
+            .expect("MLS not initialized — call init_mls() first")
     }
 
     /// Sign a message string with PGP.
     pub fn sign(&self, message: &str) -> String {
-        self.key_manager.sign_message(&self.username, message).unwrap()
+        self.key_manager
+            .sign_message(&self.username, message)
+            .unwrap()
     }
 
     /// Build a registration request (legacy format).
@@ -137,9 +140,13 @@ impl TestServer {
             Box::new(Arc::clone(&sender)),
             db,
             crypto,
+            None,
         );
 
-        TestServer { message_utils, sender }
+        TestServer {
+            message_utils,
+            sender,
+        }
     }
 
     /// Send a message and return all replies.
@@ -164,13 +171,21 @@ impl TestServer {
 /// Register a client with the server (challenge-response flow).
 pub async fn register_client(server: &mut TestServer, client: &TestClient) {
     let replies = server.send(&client.tag, client.register_msg()).await;
-    assert!(!replies.is_empty(), "No reply to register for {}", client.username);
+    assert!(
+        !replies.is_empty(),
+        "No reply to register for {}",
+        client.username
+    );
     let nonce = extract_nonce(&replies[0].1);
     let replies = server
         .send(&client.tag, client.registration_response_msg(&nonce))
         .await;
     let content = replies[0].1["content"].as_str().unwrap();
-    assert_eq!(content, "success", "Registration failed for {}: {:?}", client.username, replies[0].1);
+    assert_eq!(
+        content, "success",
+        "Registration failed for {}: {:?}",
+        client.username, replies[0].1
+    );
 }
 
 /// Fetch pending messages for a client from the server.

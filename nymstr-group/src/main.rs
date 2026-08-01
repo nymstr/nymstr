@@ -1,13 +1,14 @@
 mod config;
 mod db_utils;
+mod federation_register;
 mod message_utils;
 
 use crate::config::GroupConfig;
-use nymstr_crypto::ServerKeyManager;
 use crate::db_utils::DbUtils;
 use crate::message_utils::MessageUtils;
-use nymstr_common::logging::init_logging;
 use nym_sdk::mixnet::{MixnetClientBuilder, MixnetMessageSender, StoragePaths};
+use nymstr_common::logging::init_logging;
+use nymstr_crypto::ServerKeyManager;
 use std::path::{Path, PathBuf};
 use tokio_stream::StreamExt;
 
@@ -436,7 +437,14 @@ async fn run_server(group_config: GroupConfig, stdio_mode: bool) -> anyhow::Resu
     log::info!("Connected to mixnet. Nym Address: {}", address);
 
     let mut client_stream = client_inner;
-    let mut message_utils = MessageUtils::new(client_id, Box::new(nymstr_transport::NymReplySender::new(sender)), db, crypto, admin_key, group_id);
+    let mut message_utils = MessageUtils::new(
+        client_id,
+        Box::new(nymstr_transport::NymReplySender::new(sender)),
+        db,
+        crypto,
+        admin_key,
+        group_id,
+    );
 
     tokio::select! {
         _ = async {

@@ -193,11 +193,12 @@ impl DbUtils {
             group_id,
             username
         );
-        let res = sqlx::query("INSERT OR IGNORE INTO group_members (groupId, username) VALUES (?, ?)")
-            .bind(group_id)
-            .bind(username)
-            .execute(&self.pool)
-            .await?;
+        let res =
+            sqlx::query("INSERT OR IGNORE INTO group_members (groupId, username) VALUES (?, ?)")
+                .bind(group_id)
+                .bind(username)
+                .execute(&self.pool)
+                .await?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -489,13 +490,12 @@ impl DbUtils {
 
     /// Check if a user is a member of a group.
     pub async fn is_group_member(&self, group_id: &str, username: &str) -> Result<bool> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT 1 FROM group_members WHERE groupId = ? AND username = ?",
-        )
-        .bind(group_id)
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM group_members WHERE groupId = ? AND username = ?")
+                .bind(group_id)
+                .bind(username)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.is_some())
     }
 

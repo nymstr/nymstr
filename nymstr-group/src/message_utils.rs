@@ -1,10 +1,10 @@
-use nymstr_crypto::ServerKeyManager;
 use crate::db_utils::DbUtils;
-use nymstr_transport::{ReplyTag, ReplySender};
-use nymstr_common::rate_limiter::RateLimiter;
-use nymstr_common::validation;
 use chrono::Utc;
 use nym_sdk::mixnet::ReconstructedMessage;
+use nymstr_common::rate_limiter::RateLimiter;
+use nymstr_common::validation;
+use nymstr_crypto::ServerKeyManager;
+use nymstr_transport::{ReplySender, ReplyTag};
 use serde_json::{json, Value};
 
 // ============================================================
@@ -253,8 +253,6 @@ impl MessageUtils {
 
     /// Maximum number of pending welcomes per user
     const MAX_WELCOMES_PER_USER: i64 = 20;
-
-
 
     /// Create a new MessageUtils instance.
     pub fn new(
@@ -809,11 +807,7 @@ impl MessageUtils {
     }
 
     /// Core implementation for approve group - handles both legacy and unified formats.
-    async fn handle_approve_group_core(
-        &mut self,
-        req: ApproveGroupRequest,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_approve_group_core(&mut self, req: ApproveGroupRequest, sender_tag: ReplyTag) {
         // Rate limit
         if !self
             .check_general_rate_limit(&sender_tag, "approveGroupResponse")
@@ -976,11 +970,7 @@ impl MessageUtils {
     }
 
     /// Core implementation for send group - handles both legacy and unified formats.
-    async fn handle_send_group_core(
-        &mut self,
-        req: SendGroupRequest,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_send_group_core(&mut self, req: SendGroupRequest, sender_tag: ReplyTag) {
         // Rate limit
         if !self
             .check_general_rate_limit(&sender_tag, "sendGroupResponse")
@@ -1025,7 +1015,7 @@ impl MessageUtils {
         // Dedup check: compute SHA-256 of "{sender}:{ciphertext}" and reject duplicates
         let dedup_input = format!("{}:{}", username, req.ciphertext);
         let hash_hex = {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let hash = Sha256::digest(dedup_input.as_bytes());
             hex::encode(hash)
         };
@@ -1093,11 +1083,7 @@ impl MessageUtils {
     }
 
     /// Core implementation for fetch group - handles both legacy and unified formats.
-    async fn handle_fetch_group_core(
-        &mut self,
-        req: FetchGroupRequest,
-        sender_tag: ReplyTag,
-    ) {
+    async fn handle_fetch_group_core(&mut self, req: FetchGroupRequest, sender_tag: ReplyTag) {
         // Rate limit
         if !self
             .check_general_rate_limit(&sender_tag, "fetchGroupResponse")
