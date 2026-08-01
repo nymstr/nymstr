@@ -15,19 +15,26 @@ use sha2::{Sha256, Digest};
 
 /// Handler for incoming mixnet messages and command processing.
 pub struct MessageUtils {
-    db: DbUtils,
-    crypto: ServerKeyManager,
+    pub(crate) db: DbUtils,
+    pub(crate) crypto: ServerKeyManager,
     sender: Box<dyn ReplySender>,
     client_id: String,
     pending_users: HashMap<ReplyTag, PendingEntry<PendingUserData>>,
     nonces: HashMap<ReplyTag, PendingEntry<PendingLoginData>>,
     pending_groups: HashMap<ReplyTag, PendingEntry<PendingGroupData>>,
     /// Rate limiter for authentication endpoints (registration/login)
-    rate_limiter: RateLimiter,
+    pub(crate) rate_limiter: RateLimiter,
     /// Rate limiter for send operations (message relay)
-    send_rate_limiter: RateLimiter,
+    pub(crate) send_rate_limiter: RateLimiter,
     /// SURB pool storage for checking recipient SURB availability before relay
     surb_storage: Option<ReceivedReplySurbsMap>,
+    /// Register mutations awaiting their liveness challenge (SERVER_SPEC §8.1):
+    /// (mutation, nonce).
+    pub(crate) pending_mutations:
+        HashMap<ReplyTag, PendingEntry<(nymstr_federation::mutation::Mutation, String)>>,
+    /// The namespace transparency log, when this node runs one (SERVER_SPEC).
+    pub(crate) namespace_log:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::federation_driver::NamespaceLog>>>,
 }
 
 impl MessageUtils {
@@ -71,7 +78,19 @@ impl MessageUtils {
                 Self::SEND_RATE_LIMIT_WINDOW_SECS,
             ),
             surb_storage,
+            pending_mutations: HashMap::new(),
+            namespace_log: None,
         }
+    }
+
+    /// Attach the namespace transparency log, enabling the SERVER_SPEC v2
+    /// actions (submitMutation, lookupProof, ...).
+    pub fn with_namespace_log(
+        mut self,
+        log: std::sync::Arc<tokio::sync::Mutex<crate::federation_driver::NamespaceLog>>,
+    ) -> Self {
+        self.namespace_log = Some(log);
+        self
     }
 
     /// Remove stale entries from all pending HashMaps that exceed the TTL.
@@ -94,6 +113,9 @@ impl MessageUtils {
         self.pending_groups
             .retain(|_, entry| now.duration_since(entry.created_at).as_secs() < ttl_secs);
         let pending_groups_removed = pending_groups_before - self.pending_groups.len();
+
+        self.pending_mutations
+            .retain(|_, entry| now.duration_since(entry.created_at).as_secs() < ttl_secs);
 
         let total_removed = pending_users_removed + nonces_removed + pending_groups_removed;
         if total_removed > 0 {
@@ -239,6 +261,63 @@ impl MessageUtils {
                     }
                     "fetchKeyPackage" => {
                         self.handle_fetch_key_package(payload, sender_tag).await
+                    }
+                    // Namespace transparency-log actions (SERVER_SPEC.md §8).
+                    "submitMutation" => {
+                        self.handle_submit_mutation(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "submitMutationResponse" => {
+                        self.handle_submit_mutation_response(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "mutationStatus" => {
+                        self.handle_mutation_status(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "nodeDescriptor" => {
+                        self.handle_node_descriptor(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "lookupProof" => {
+                        self.handle_lookup_proof(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "sthRange" => {
+                        self.handle_sth_range(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "entryHistory" => {
+                        self.handle_entry_history(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "keyPackagePublish" => {
+                        self.handle_key_package_publish(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "keyPackageFetch" => {
+                        self.handle_key_package_fetch(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "groupAddressPublish" => {
+                        self.handle_group_address_publish(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "groupAddress" => {
+                        self.handle_group_address(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "witnessRoot" => {
+                        self.handle_witness_root(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "submitConflict" => {
+                        self.handle_submit_conflict(payload, sender_tag, sender_username)
+                            .await
+                    }
+                    "conflictCerts" => {
+                        self.handle_conflict_certs(payload, sender_tag, sender_username)
+                            .await
                     }
                     _ => log::error!("Unknown unified action: {}", action),
                 }
@@ -2411,7 +2490,7 @@ impl MessageUtils {
     }
 
     /// Send a unified format reply
-    async fn send_unified_reply(
+    pub(crate) async fn send_unified_reply(
         &self,
         recipient: &ReplyTag,
         payload: Value,

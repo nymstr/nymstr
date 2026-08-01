@@ -1,6 +1,7 @@
 use nymstr_crypto::ServerKeyManager;
 use nymstr_server::db_utils::DbUtils;
 use nymstr_server::env_loader::load_env;
+use nymstr_server::federation_driver::{spawn_epoch_timer, NamespaceLog, DEFAULT_EPOCH_SECONDS};
 use nymstr_server::log_config::init_logging;
 use nymstr_server::message_utils::MessageUtils;
 use nymstr_server::transport::{NymReplySender, ReplyTag, StdioReplySender};
@@ -220,9 +221,33 @@ async fn main() -> anyhow::Result<()> {
     let address = client_inner.nym_address();
     log::info!("Connected to mixnet. Nym Address: {}", address);
 
+    // Start the namespace transparency log (SERVER_SPEC.md): rebuild state
+    // from the database, publish a descriptor for the current address, and
+    // finalize an epoch every FED_EPOCH_SECONDS while mutations are pending.
+    let epoch_seconds = std::env::var("FED_EPOCH_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_EPOCH_SECONDS);
+    let namespace_log = NamespaceLog::bootstrap(
+        db.clone(),
+        crypto.clone(),
+        &client_id,
+        &address.to_string(),
+        epoch_seconds,
+    )
+    .await?;
+    let namespace_log = std::sync::Arc::new(tokio::sync::Mutex::new(namespace_log));
+    let _epoch_timer = spawn_epoch_timer(namespace_log.clone(), epoch_seconds);
+
     let mut client_stream = client_inner;
-    let mut message_utils =
-        MessageUtils::new(client_id.clone(), Box::new(NymReplySender::new(sender)), db, crypto, Some(surb_storage));
+    let mut message_utils = MessageUtils::new(
+        client_id.clone(),
+        Box::new(NymReplySender::new(sender)),
+        db,
+        crypto,
+        Some(surb_storage),
+    )
+    .with_namespace_log(namespace_log);
     tokio::select! {
         _ = async {
             while let Some(msg) = client_stream.next().await {

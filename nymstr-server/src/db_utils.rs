@@ -85,6 +85,57 @@ impl DbUtils {
                 expires_at      INTEGER NOT NULL DEFAULT (unixepoch() + 2592000)
             );
             CREATE INDEX IF NOT EXISTS idx_kp_username ON key_packages(username);
+
+            -- Namespace transparency log (SERVER_SPEC.md §5-§12).
+            CREATE TABLE IF NOT EXISTS directory_entries (
+                key        TEXT PRIMARY KEY,
+                entryJson  TEXT NOT NULL,
+                leafHash   TEXT NOT NULL,
+                status     TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fed_mutations (
+                mutationHash  TEXT PRIMARY KEY,
+                key           TEXT NOT NULL,
+                seqNo         INTEGER NOT NULL,
+                mutationJson  TEXT NOT NULL,
+                state         TEXT NOT NULL DEFAULT 'pending',
+                rejectReason  TEXT,
+                epoch         INTEGER,
+                promiseJson   TEXT,
+                receivedAt    INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_fed_mutations_state ON fed_mutations(state);
+            CREATE TABLE IF NOT EXISTS log_epochs (
+                epoch       INTEGER PRIMARY KEY,
+                epochHash   TEXT NOT NULL,
+                headerJson  TEXT NOT NULL,
+                sthJson     TEXT NOT NULL,
+                batchJson   TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS node_descriptors (
+                nodeId          TEXT PRIMARY KEY,
+                descriptorJson  TEXT NOT NULL,
+                issuedAt        TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fed_key_packages (
+                username    TEXT PRIMARY KEY,
+                keyPackage  TEXT NOT NULL,
+                sig         TEXT NOT NULL,
+                updatedAt   INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE IF NOT EXISTS group_addresses (
+                groupId     TEXT PRIMARY KEY,
+                recordJson  TEXT NOT NULL,
+                sig         TEXT NOT NULL,
+                issuedAt    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conflict_certs (
+                certHash    TEXT PRIMARY KEY,
+                subjectNode TEXT NOT NULL,
+                certJson    TEXT NOT NULL,
+                recordedAt  INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_conflict_subject ON conflict_certs(subjectNode);
             "#,
         )
         .execute(&pool)
@@ -459,6 +510,305 @@ impl DbUtils {
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected())
+    }
+
+    // ===== NAMESPACE TRANSPARENCY LOG (SERVER_SPEC.md) =====
+
+
+    /// Queue a mutation into the pool with its inclusion promise.
+    /// Returns false if a mutation with the same hash already exists.
+    pub async fn insert_fed_mutation(
+        &self,
+        mutation_hash: &str,
+        key: &str,
+        seq_no: u64,
+        mutation_json: &str,
+        promise_json: &str,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO fed_mutations (mutationHash, key, seqNo, mutationJson, promiseJson) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(mutation_hash)
+        .bind(key)
+        .bind(seq_no as i64)
+        .bind(mutation_json)
+        .bind(promise_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// All pending mutations, oldest first. Returns (mutationHash, mutationJson).
+    pub async fn pending_fed_mutations(&self) -> Result<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT mutationHash, mutationJson FROM fed_mutations WHERE state = 'pending' ORDER BY receivedAt ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// Status of a mutation: (state, epoch, rejectReason, promiseJson).
+    #[allow(clippy::type_complexity)]
+    pub async fn fed_mutation_status(
+        &self,
+        mutation_hash: &str,
+    ) -> Result<Option<(String, Option<i64>, Option<String>, Option<String>)>> {
+        let row = sqlx::query(
+            "SELECT state, epoch, rejectReason, promiseJson FROM fed_mutations WHERE mutationHash = ?",
+        )
+        .bind(mutation_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
+    }
+
+    /// Finalize an epoch atomically: store the epoch row, upsert the changed
+    /// directory entries, and mark pool mutations finalized or rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_epoch(
+        &self,
+        epoch: u64,
+        epoch_hash: &str,
+        header_json: &str,
+        sth_json: &str,
+        batch_json: &str,
+        changed_entries: &[(String, String, String, String)], // (key, entryJson, leafHash, status)
+        finalized_hashes: &[String],
+        rejected: &[(String, String)], // (mutationHash, reason)
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO log_epochs (epoch, epochHash, headerJson, sthJson, batchJson) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(epoch as i64)
+        .bind(epoch_hash)
+        .bind(header_json)
+        .bind(sth_json)
+        .bind(batch_json)
+        .execute(&mut *tx)
+        .await?;
+        for (key, entry_json, leaf_hash, status) in changed_entries {
+            sqlx::query(
+                "INSERT INTO directory_entries (key, entryJson, leafHash, status) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET entryJson = excluded.entryJson, leafHash = excluded.leafHash, status = excluded.status",
+            )
+            .bind(key)
+            .bind(entry_json)
+            .bind(leaf_hash)
+            .bind(status)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for hash in finalized_hashes {
+            sqlx::query(
+                "UPDATE fed_mutations SET state = 'finalized', epoch = ? WHERE mutationHash = ?",
+            )
+            .bind(epoch as i64)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for (hash, reason) in rejected {
+            sqlx::query(
+                "UPDATE fed_mutations SET state = 'rejected', rejectReason = ? WHERE mutationHash = ?",
+            )
+            .bind(reason)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// All directory entries' JSON, in no particular order (state rebuild).
+    pub async fn load_directory_entries(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT entryJson FROM directory_entries")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    /// All finalized epochs in order. Returns (epoch, epochHash).
+    pub async fn load_epoch_hashes(&self) -> Result<Vec<(u64, String)>> {
+        let rows = sqlx::query("SELECT epoch, epochHash FROM log_epochs ORDER BY epoch ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<i64, _>(0) as u64, r.get(1)))
+            .collect())
+    }
+
+    /// STHs (+ batches) from a given epoch onward. Returns (epoch, sthJson, batchJson).
+    pub async fn epochs_from(&self, from_epoch: u64) -> Result<Vec<(u64, String, String)>> {
+        let rows = sqlx::query(
+            "SELECT epoch, sthJson, batchJson FROM log_epochs WHERE epoch >= ? ORDER BY epoch ASC",
+        )
+        .bind(from_epoch as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<i64, _>(0) as u64, r.get(1), r.get(2)))
+            .collect())
+    }
+
+    /// Cache a node descriptor (newest issuedAt wins).
+    pub async fn store_node_descriptor(
+        &self,
+        node_id: &str,
+        descriptor_json: &str,
+        issued_at: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO node_descriptors (nodeId, descriptorJson, issuedAt) VALUES (?, ?, ?)
+             ON CONFLICT(nodeId) DO UPDATE SET descriptorJson = excluded.descriptorJson, issuedAt = excluded.issuedAt
+             WHERE excluded.issuedAt > node_descriptors.issuedAt",
+        )
+        .bind(node_id)
+        .bind(descriptor_json)
+        .bind(issued_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch a cached node descriptor's JSON.
+    pub async fn get_node_descriptor(&self, node_id: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT descriptorJson FROM node_descriptors WHERE nodeId = ?")
+            .bind(node_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    /// Directory key a pooled/finalized mutation targets.
+    pub async fn fed_mutation_key(&self, mutation_hash: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT key FROM fed_mutations WHERE mutationHash = ?")
+            .bind(mutation_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    /// Finalized mutation chain for a key, in seqNo order (entryHistory).
+    pub async fn finalized_mutations_for_key(&self, key: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT mutationJson FROM fed_mutations WHERE key = ? AND state = 'finalized' ORDER BY seqNo ASC",
+        )
+        .bind(key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
+    }
+
+    /// Store (or replace) a user's MLS KeyPackage (SERVER_SPEC §10).
+    pub async fn upsert_key_package(
+        &self,
+        username: &str,
+        key_package: &str,
+        sig: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO fed_key_packages (username, keyPackage, sig, updatedAt) VALUES (?, ?, ?, unixepoch())
+             ON CONFLICT(username) DO UPDATE SET keyPackage = excluded.keyPackage, sig = excluded.sig, updatedAt = excluded.updatedAt",
+        )
+        .bind(username)
+        .bind(key_package)
+        .bind(sig)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch a user's stored KeyPackage. Returns (keyPackage, sig).
+    pub async fn get_key_package(&self, username: &str) -> Result<Option<(String, String)>> {
+        let row = sqlx::query("SELECT keyPackage, sig FROM fed_key_packages WHERE username = ?")
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| (r.get(0), r.get(1))))
+    }
+
+    /// Store a group's signed address record (SERVER_SPEC §11.3); newest
+    /// issuedAt wins.
+    pub async fn upsert_group_address(
+        &self,
+        group_id: &str,
+        record_json: &str,
+        sig: &str,
+        issued_at: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO group_addresses (groupId, recordJson, sig, issuedAt) VALUES (?, ?, ?, ?)
+             ON CONFLICT(groupId) DO UPDATE SET recordJson = excluded.recordJson, sig = excluded.sig, issuedAt = excluded.issuedAt
+             WHERE excluded.issuedAt > group_addresses.issuedAt",
+        )
+        .bind(group_id)
+        .bind(record_json)
+        .bind(sig)
+        .bind(issued_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch a group's signed address record. Returns (recordJson, sig).
+    pub async fn get_group_address(&self, group_id: &str) -> Result<Option<(String, String)>> {
+        let row = sqlx::query("SELECT recordJson, sig FROM group_addresses WHERE groupId = ?")
+            .bind(group_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| (r.get(0), r.get(1))))
+    }
+
+    /// Replace a stored epoch's STH JSON (used when a witness signature is
+    /// attached to an already-finalized tree head).
+    pub async fn update_epoch_sth(&self, epoch: u64, sth_json: &str) -> Result<bool> {
+        let res = sqlx::query("UPDATE log_epochs SET sthJson = ? WHERE epoch = ?")
+            .bind(sth_json)
+            .bind(epoch as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Store a conflict certificate (idempotent by content hash).
+    pub async fn insert_conflict_cert(
+        &self,
+        cert_hash: &str,
+        subject_node: &str,
+        cert_json: &str,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO conflict_certs (certHash, subjectNode, certJson) VALUES (?, ?, ?)",
+        )
+        .bind(cert_hash)
+        .bind(subject_node)
+        .bind(cert_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// All known conflict certificates, optionally filtered by subject node.
+    pub async fn conflict_certs(&self, subject_node: Option<&str>) -> Result<Vec<String>> {
+        let rows = match subject_node {
+            Some(node) => {
+                sqlx::query("SELECT certJson FROM conflict_certs WHERE subjectNode = ?")
+                    .bind(node)
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query("SELECT certJson FROM conflict_certs")
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+        Ok(rows.into_iter().map(|r| r.get(0)).collect())
     }
 }
 

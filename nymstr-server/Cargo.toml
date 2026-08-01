@@ -34,6 +34,7 @@ ed25519-zebra = { version = "4.1", features = ["alloc"] }
 async-trait = "0.1"
 nymstr-common = { path = "../crates/nymstr-common" }
 nymstr-crypto = { path = "../crates/nymstr-crypto" }
+nymstr-federation = { path = "../crates/nymstr-federation" }
 nymstr-transport = { path = "../crates/nymstr-transport" }
 
 [dev-dependencies]

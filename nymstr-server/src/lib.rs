@@ -1,5 +1,7 @@
 pub mod db_utils;
 pub mod env_loader;
+pub mod federation_actions;
+pub mod federation_driver;
 pub mod message_utils;
 pub mod pending;
 

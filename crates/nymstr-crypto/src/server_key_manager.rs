@@ -16,6 +16,7 @@ use std::path::PathBuf;
 /// - `generate_key_pair(username)` → returns armored public key
 /// - `sign_message(username, message)` → returns base64 signature
 /// - `verify_signature(public_key_armored, message, signature)` → bool
+#[derive(Clone)]
 pub struct ServerKeyManager {
     key_dir: PathBuf,
     passphrase: SecurePassphrase,
@@ -62,6 +63,13 @@ impl ServerKeyManager {
             Some((_, public_key)) => Ok(public_key),
             None => anyhow::bail!("No keys found for user: {}", username),
         }
+    }
+
+    /// Load and armor the public key for a username. The transparency-log node
+    /// id is `SHA256(this string)`, so it must be derived consistently
+    /// (SERVER_SPEC.md §2.1).
+    pub fn public_key_armored(&self, username: &str) -> Result<String> {
+        PgpKeyManager::public_key_armored(&self.load_public_key(username)?)
     }
 
     /// Check if keys exist for a username.
