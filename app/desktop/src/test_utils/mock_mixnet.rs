@@ -96,7 +96,10 @@ impl MockMixnetService {
     pub async fn inject_incoming(&self, message: MixnetMessage) -> Result<()> {
         let tx = self.incoming_tx.lock().await;
         if let Some(ref sender) = *tx {
-            sender.send(message).await.map_err(|e| anyhow::anyhow!("Failed to inject message: {}", e))?;
+            sender
+                .send(message)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to inject message: {}", e))?;
         }
         Ok(())
     }
@@ -144,7 +147,12 @@ impl MockMixnetService {
     }
 
     /// Record a sent message
-    async fn record_send(&self, recipient: &str, message: MixnetMessage, raw_data: Option<Vec<u8>>) {
+    async fn record_send(
+        &self,
+        recipient: &str,
+        message: MixnetMessage,
+        raw_data: Option<Vec<u8>>,
+    ) {
         let sent = SentMessage {
             recipient: recipient.to_string(),
             message,
@@ -171,12 +179,18 @@ impl MixnetSender for MockMixnetService {
             }),
             Err(_) => MixnetMessage::query("raw"),
         };
-        self.record_send(recipient_address, message, Some(data)).await;
+        self.record_send(recipient_address, message, Some(data))
+            .await;
         Ok(())
     }
 
-    async fn send_message_to(&self, recipient_address: &str, message: &MixnetMessage) -> Result<()> {
-        self.record_send(recipient_address, message.clone(), None).await;
+    async fn send_message_to(
+        &self,
+        recipient_address: &str,
+        message: &MixnetMessage,
+    ) -> Result<()> {
+        self.record_send(recipient_address, message.clone(), None)
+            .await;
         Ok(())
     }
 
@@ -226,7 +240,8 @@ impl MixnetSender for MockMixnetService {
         conversation_id: &str,
         signature: &str,
     ) -> Result<()> {
-        let msg = MixnetMessage::direct_message(sender, recipient, content, conversation_id, signature);
+        let msg =
+            MixnetMessage::direct_message(sender, recipient, content, conversation_id, signature);
 
         // Check if we have a direct address
         if let Some(addr) = self.peer_addresses.read().await.get(recipient) {
@@ -245,15 +260,17 @@ impl MixnetSender for MockMixnetService {
         mls_message: &[u8],
         signature: &str,
     ) -> Result<()> {
-        let msg = MixnetMessage::mls_message_raw(sender, recipient, conversation_id, mls_message, signature);
+        let msg = MixnetMessage::mls_message_raw(
+            sender,
+            recipient,
+            conversation_id,
+            mls_message,
+            signature,
+        );
         self.send_to_server(&msg).await
     }
 
-    async fn send_sealed_message(
-        &self,
-        recipient: &str,
-        sealed_payload_b64: &str,
-    ) -> Result<()> {
+    async fn send_sealed_message(&self, recipient: &str, sealed_payload_b64: &str) -> Result<()> {
         let msg = MixnetMessage::sealed_send(recipient, sealed_payload_b64);
         self.send_to_server(&msg).await
     }
@@ -286,7 +303,7 @@ impl MixnetSender for MockMixnetService {
         self.send_to_server(&msg).await
     }
 
-async fn send_group_join_response(
+    async fn send_group_join_response(
         &self,
         sender: &str,
         recipient: &str,
@@ -294,7 +311,8 @@ async fn send_group_join_response(
         success: bool,
         signature: &str,
     ) -> Result<()> {
-        let msg = MixnetMessage::group_join_response(sender, recipient, group_id, success, signature);
+        let msg =
+            MixnetMessage::group_join_response(sender, recipient, group_id, success, signature);
         self.send_to_server(&msg).await
     }
 
@@ -337,7 +355,13 @@ async fn send_group_join_response(
         group_server_address: &str,
         timestamp: i64,
     ) -> Result<()> {
-        let msg = MixnetMessage::approve_group_member(admin, username_to_approve, signature, group_server_address, timestamp);
+        let msg = MixnetMessage::approve_group_member(
+            admin,
+            username_to_approve,
+            signature,
+            group_server_address,
+            timestamp,
+        );
         self.record_send(group_server_address, msg, None).await;
         Ok(())
     }
@@ -478,7 +502,8 @@ async fn send_group_join_response(
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        let msg = MixnetMessage::store_welcome(sender, group_id, target_username, welcome, signature);
+        let msg =
+            MixnetMessage::store_welcome(sender, group_id, target_username, welcome, signature);
         self.record_send(group_server_address, msg, None).await;
         Ok(())
     }
@@ -541,15 +566,17 @@ async fn send_group_join_response(
         pgp_fingerprint: &str,
         signature: &str,
     ) -> Result<()> {
-        let mut msg = MixnetMessage::publish_key_package(sender, key_package_b64, pgp_signature, pgp_fingerprint);
+        let mut msg = MixnetMessage::publish_key_package(
+            sender,
+            key_package_b64,
+            pgp_signature,
+            pgp_fingerprint,
+        );
         msg.set_signature(signature);
         self.send_to_server(&msg).await
     }
 
-    async fn send_fetch_key_package_challenge(
-        &self,
-        target_username: &str,
-    ) -> Result<()> {
+    async fn send_fetch_key_package_challenge(&self, target_username: &str) -> Result<()> {
         let msg = MixnetMessage::fetch_key_package_challenge(target_username);
         self.send_to_server(&msg).await
     }
@@ -580,7 +607,10 @@ impl MixnetAddressStore for MockMixnetService {
     }
 
     async fn register_peer_address(&self, username: &str, address: &str) {
-        self.peer_addresses.write().await.insert(username.to_string(), address.to_string());
+        self.peer_addresses
+            .write()
+            .await
+            .insert(username.to_string(), address.to_string());
     }
 
     async fn get_peer_address(&self, username: &str) -> Option<String> {
@@ -595,9 +625,12 @@ mod tests {
     #[tokio::test]
     async fn test_mock_mixnet_records_sent_messages() {
         let mock = MockMixnetService::new();
-        mock.set_server_address(Some("test-server".to_string())).await;
+        mock.set_server_address(Some("test-server".to_string()))
+            .await;
 
-        mock.send_registration_request("alice", "pubkey123").await.unwrap();
+        mock.send_registration_request("alice", "pubkey123")
+            .await
+            .unwrap();
 
         let sent = mock.get_sent_messages().await;
         assert_eq!(sent.len(), 1);
@@ -608,10 +641,15 @@ mod tests {
     #[tokio::test]
     async fn test_mock_mixnet_filter_by_action() {
         let mock = MockMixnetService::new();
-        mock.set_server_address(Some("test-server".to_string())).await;
+        mock.set_server_address(Some("test-server".to_string()))
+            .await;
 
-        mock.send_registration_request("alice", "pubkey").await.unwrap();
-        mock.send_ping("alice", 1234567890, "test_sig").await.unwrap();
+        mock.send_registration_request("alice", "pubkey")
+            .await
+            .unwrap();
+        mock.send_ping("alice", 1234567890, "test_sig")
+            .await
+            .unwrap();
         mock.send_query_request("bob").await.unwrap();
 
         let ping_msgs = mock.get_sent_by_action("ping").await;

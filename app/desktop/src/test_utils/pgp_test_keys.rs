@@ -86,7 +86,9 @@ impl TestUser {
 }
 
 /// Generate a test keypair for a given username
-pub fn generate_test_keypair(username: &str) -> Result<(SignedSecretKey, SignedPublicKey, SecurePassphrase)> {
+pub fn generate_test_keypair(
+    username: &str,
+) -> Result<(SignedSecretKey, SignedPublicKey, SecurePassphrase)> {
     let passphrase = SecurePassphrase::generate_strong();
     let (secret_key, public_key) = PgpKeyManager::generate_keypair_secure(username, &passphrase)?;
     Ok((secret_key, public_key, passphrase))

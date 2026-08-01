@@ -276,3 +276,32 @@ export async function denyContactRequest(fromUsername: string): Promise<void> {
 export async function denyWelcome(welcomeId: number): Promise<void> {
   return invoke('deny_welcome', { welcomeId });
 }
+
+// ============================================================================
+// Transparency-log (federation) identity verification
+// ============================================================================
+
+export interface PublishResult {
+  status: string;
+  message: string;
+  mutationHash?: string;
+}
+
+export interface VerifyResult {
+  status: 'verified' | 'migrated' | 'revoked' | 'absent' | 'failed';
+  message: string;
+  qualifiedName?: string;
+  fingerprint?: string;
+  seqNo?: number;
+  migratedTo?: string;
+}
+
+/** Publish the current user's identity key into the discovery node's log. */
+export async function publishIdentity(): Promise<PublishResult> {
+  return invoke('publish_identity');
+}
+
+/** Verify a user's identity via a proof-carrying lookup. */
+export async function verifyIdentity(username: string): Promise<VerifyResult> {
+  return invoke('verify_identity', { username });
+}

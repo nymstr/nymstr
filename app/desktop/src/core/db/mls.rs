@@ -88,10 +88,9 @@ impl MlsDb {
     /// List all MLS conversations
     #[allow(dead_code)]
     pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<String>> {
-        let rows =
-            sqlx::query("SELECT conversation_id FROM mls_groups ORDER BY updated_at DESC")
-                .fetch_all(pool)
-                .await?;
+        let rows = sqlx::query("SELECT conversation_id FROM mls_groups ORDER BY updated_at DESC")
+            .fetch_all(pool)
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -427,7 +426,9 @@ mod tests {
         let pool = setup_test_db().await;
         let state = vec![1, 2, 3, 4, 5];
 
-        MlsDb::save_group_state(&pool, "conv1", &state).await.unwrap();
+        MlsDb::save_group_state(&pool, "conv1", &state)
+            .await
+            .unwrap();
         let loaded = MlsDb::load_group_state(&pool, "conv1").await.unwrap();
 
         assert!(loaded.is_some());
@@ -438,9 +439,10 @@ mod tests {
     async fn test_key_package_operations() {
         let pool = setup_test_db().await;
 
-        let id = MlsDb::store_key_package(&pool, "base64data", Some("alice"), "X25519-SHA256", None)
-            .await
-            .unwrap();
+        let id =
+            MlsDb::store_key_package(&pool, "base64data", Some("alice"), "X25519-SHA256", None)
+                .await
+                .unwrap();
 
         let pkg = MlsDb::get_key_package(&pool).await.unwrap();
         assert!(pkg.is_some());

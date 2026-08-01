@@ -10,11 +10,11 @@ use crate::types::{ApiError, ContactDTO};
 
 /// Get all contacts for the current user
 #[tauri::command]
-pub async fn get_contacts(
-    state: State<'_, AppState>,
-) -> Result<Vec<ContactDTO>, ApiError> {
+pub async fn get_contacts(state: State<'_, AppState>) -> Result<Vec<ContactDTO>, ApiError> {
     // Get current user to scope contacts
-    let current_user = state.get_current_user().await
+    let current_user = state
+        .get_current_user()
+        .await
         .ok_or_else(|| ApiError::authentication("Not logged in"))?;
 
     tracing::debug!("Fetching contacts for user: {}", current_user.username);
@@ -64,10 +64,16 @@ pub async fn add_contact(
     state: State<'_, AppState>,
 ) -> Result<ContactDTO, ApiError> {
     // Get current user to scope contact ownership
-    let current_user = state.get_current_user().await
+    let current_user = state
+        .get_current_user()
+        .await
         .ok_or_else(|| ApiError::authentication("Not logged in"))?;
 
-    tracing::info!("User {} adding contact: {}", current_user.username, username);
+    tracing::info!(
+        "User {} adding contact: {}",
+        current_user.username,
+        username
+    );
 
     // Validate username
     if username.is_empty() || username.len() > 64 {
@@ -80,14 +86,13 @@ pub async fn add_contact(
     }
 
     // Get the user's public key from query cache (populated by query_user)
-    let public_key: String = sqlx::query_scalar(
-        "SELECT public_key FROM query_cache WHERE username = ?"
-    )
-    .bind(&username)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(e.to_string()))?
-    .unwrap_or_default();
+    let public_key: String =
+        sqlx::query_scalar("SELECT public_key FROM query_cache WHERE username = ?")
+            .bind(&username)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .unwrap_or_default();
 
     let display_name = display_name.unwrap_or_else(|| username.clone());
 
@@ -117,15 +122,18 @@ pub async fn add_contact(
 
 /// Remove a contact for the current user
 #[tauri::command]
-pub async fn remove_contact(
-    username: String,
-    state: State<'_, AppState>,
-) -> Result<(), ApiError> {
+pub async fn remove_contact(username: String, state: State<'_, AppState>) -> Result<(), ApiError> {
     // Get current user to scope deletion
-    let current_user = state.get_current_user().await
+    let current_user = state
+        .get_current_user()
+        .await
         .ok_or_else(|| ApiError::authentication("Not logged in"))?;
 
-    tracing::info!("User {} removing contact: {}", current_user.username, username);
+    tracing::info!(
+        "User {} removing contact: {}",
+        current_user.username,
+        username
+    );
 
     sqlx::query("DELETE FROM contacts WHERE owner_username = ? AND username = ?")
         .bind(&current_user.username)
@@ -146,9 +154,13 @@ pub async fn query_user(
     tracing::info!("Querying user: {}", username);
 
     // Ensure we're connected (mixnet must be up), but don't leak identity in the query
-    let _current_user = state.get_current_user().await
+    let _current_user = state
+        .get_current_user()
+        .await
         .ok_or_else(|| ApiError::authentication("Not logged in"))?;
-    let mixnet_service = state.get_mixnet_service().await
+    let mixnet_service = state
+        .get_mixnet_service()
+        .await
         .ok_or_else(|| ApiError::not_connected("Mixnet not connected"))?;
 
     // Register pending query to receive the response
@@ -161,11 +173,7 @@ pub async fn query_user(
         .map_err(|e| ApiError::internal(format!("Failed to send query: {}", e)))?;
 
     // Wait for response with timeout (15 seconds)
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        rx,
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), rx).await;
 
     match result {
         Ok(Ok(Some(query_result))) => {
@@ -173,7 +181,7 @@ pub async fn query_user(
 
             // Cache the public key so add_contact and accept_contact_request can use it
             let _ = sqlx::query(
-                "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)"
+                "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)",
             )
             .bind(&query_result.username)
             .bind(&query_result.public_key)
@@ -198,7 +206,9 @@ pub async fn query_user(
             // Timeout
             state.cancel_pending_query(&username).await;
             tracing::warn!("Query timed out for user: {}", username);
-            Err(ApiError::timeout("Query timed out waiting for server response"))
+            Err(ApiError::timeout(
+                "Query timed out waiting for server response",
+            ))
         }
     }
 }

@@ -277,7 +277,10 @@ impl WelcomeFlowHandler {
 
                 // Generate and send KeyPackage response using shared MLS client
                 if self.mls_client.is_some() {
-                    match self.generate_and_send_key_package(user, sender, group_id).await {
+                    match self
+                        .generate_and_send_key_package(user, sender, group_id)
+                        .await
+                    {
                         Ok(_) => {
                             log::info!(
                                 "Sent KeyPackage response to {} for group {}",
@@ -310,11 +313,7 @@ impl WelcomeFlowHandler {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow!("Missing keyPackage"))?;
 
-                log::info!(
-                    "Received KeyPackage from {} for group {}",
-                    sender,
-                    group_id
-                );
+                log::info!("Received KeyPackage from {} for group {}", sender, group_id);
 
                 // Add the member to the group using their KeyPackage and shared MLS client
                 if self.mls_client.is_some() {
@@ -428,7 +427,11 @@ impl WelcomeFlowHandler {
     ///
     /// Uses the shared MLS client from AppState to maintain state across messages.
     /// Returns the processing result containing group info for event emission.
-    async fn process_pending_welcome(&self, user: &str, welcome: &StoredWelcome) -> Result<WelcomeProcessResult> {
+    async fn process_pending_welcome(
+        &self,
+        user: &str,
+        welcome: &StoredWelcome,
+    ) -> Result<WelcomeProcessResult> {
         // Get shared MLS client
         let mls_client = self
             .mls_client
@@ -436,11 +439,10 @@ impl WelcomeFlowHandler {
             .ok_or_else(|| anyhow!("MLS client not available"))?;
 
         // Get PGP keys for signing acknowledgment
-        let (secret_key, passphrase) =
-            match (&self.pgp_secret_key, &self.pgp_passphrase) {
-                (Some(sk), Some(pp)) => (Arc::clone(sk), Arc::clone(pp)),
-                _ => return Err(anyhow!("PGP keys not available")),
-            };
+        let (secret_key, passphrase) = match (&self.pgp_secret_key, &self.pgp_passphrase) {
+            (Some(sk), Some(pp)) => (Arc::clone(sk), Arc::clone(pp)),
+            _ => return Err(anyhow!("PGP keys not available")),
+        };
 
         // Convert StoredWelcome to MlsWelcome using the built-in method
         let mls_welcome = welcome.to_mls_welcome();
@@ -460,15 +462,17 @@ impl WelcomeFlowHandler {
 
         // Update group_memberships table with the MLS group ID
         // First, try to find a matching group server by group_id
-        let server_address: Option<(String,)> = sqlx::query_as(
-            "SELECT address FROM groups WHERE id = ? OR address LIKE ?"
-        )
-        .bind(&welcome.group_id)
-        .bind(format!("%{}%", &welcome.group_id[..8.min(welcome.group_id.len())]))
-        .fetch_optional(&self.db)
-        .await
-        .ok()
-        .flatten();
+        let server_address: Option<(String,)> =
+            sqlx::query_as("SELECT address FROM groups WHERE id = ? OR address LIKE ?")
+                .bind(&welcome.group_id)
+                .bind(format!(
+                    "%{}%",
+                    &welcome.group_id[..8.min(welcome.group_id.len())]
+                ))
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
 
         if let Some((addr,)) = server_address {
             // Update the MLS group ID in memberships (scoped to current user)
@@ -542,8 +546,7 @@ impl WelcomeFlowHandler {
 
         // Generate a KeyPackage using the shared MLS client
         let key_package_bytes = mls_client.generate_key_package()?;
-        let key_package_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&key_package_bytes);
+        let key_package_b64 = base64::engine::general_purpose::STANDARD.encode(&key_package_bytes);
 
         // Sign and send
         let signature = PgpSigner::sign_detached_secure(
@@ -553,7 +556,13 @@ impl WelcomeFlowHandler {
         )?;
 
         self.service
-            .send_key_package_for_group_response(user, requester, group_id, &key_package_b64, &signature)
+            .send_key_package_for_group_response(
+                user,
+                requester,
+                group_id,
+                &key_package_b64,
+                &signature,
+            )
             .await?;
 
         Ok(())
@@ -589,7 +598,8 @@ impl WelcomeFlowHandler {
             .ok_or_else(|| anyhow!("No group server found for group {}", group_id))?;
 
         // Decode KeyPackage
-        let key_package_bytes = base64::engine::general_purpose::STANDARD.decode(key_package_b64)?;
+        let key_package_bytes =
+            base64::engine::general_purpose::STANDARD.decode(key_package_b64)?;
 
         // Add member and generate Welcome + Commit using the shared MLS client
         let add_result = mls_client
@@ -643,12 +653,14 @@ impl WelcomeFlowHandler {
         );
 
         // Update join request status if one exists
-        sqlx::query("UPDATE join_requests SET status = 'approved' WHERE group_id = ? AND sender = ?")
-            .bind(group_id)
-            .bind(new_member)
-            .execute(&self.db)
-            .await
-            .ok(); // Ignore errors if no request exists
+        sqlx::query(
+            "UPDATE join_requests SET status = 'approved' WHERE group_id = ? AND sender = ?",
+        )
+        .bind(group_id)
+        .bind(new_member)
+        .execute(&self.db)
+        .await
+        .ok(); // Ignore errors if no request exists
 
         log::info!(
             "Added {} to group {} and sent Welcome + Commit via group server {}",

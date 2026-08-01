@@ -37,7 +37,6 @@ pub use user::UserDb;
 // Re-export MLS types from crypto module
 pub use crate::crypto::mls::types::StoredWelcome;
 
-
 use anyhow::Result;
 use sqlx::SqlitePool;
 
@@ -231,8 +230,14 @@ impl Db {
         cipher_suite: &str,
         expires_at: Option<&str>,
     ) -> Result<i64> {
-        MlsDb::store_key_package(pool, key_package_b64, credential_username, cipher_suite, expires_at)
-            .await
+        MlsDb::store_key_package(
+            pool,
+            key_package_b64,
+            credential_username,
+            cipher_suite,
+            expires_at,
+        )
+        .await
     }
 
     /// Get an unused key package
@@ -306,7 +311,11 @@ impl Db {
     }
 
     /// Update invite status
-    pub async fn update_invite_status(pool: &SqlitePool, invite_id: i64, status: &str) -> Result<()> {
+    pub async fn update_invite_status(
+        pool: &SqlitePool,
+        invite_id: i64,
+        status: &str,
+    ) -> Result<()> {
         GroupDb::update_invite_status(pool, invite_id, status).await
     }
 

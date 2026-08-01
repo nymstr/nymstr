@@ -103,11 +103,13 @@ impl ContactDb {
         owner_username: &str,
         username: &str,
     ) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT public_key FROM contacts WHERE owner_username = ? AND username = ?")
-            .bind(owner_username)
-            .bind(username)
-            .fetch_optional(pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT public_key FROM contacts WHERE owner_username = ? AND username = ?",
+        )
+        .bind(owner_username)
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
 
         match row {
             Some(r) => Ok(r.try_get("public_key")?),
@@ -127,7 +129,11 @@ impl ContactDb {
     }
 
     /// Update contact's last seen timestamp
-    pub async fn update_last_seen(pool: &SqlitePool, username: &str, last_seen: &str) -> Result<()> {
+    pub async fn update_last_seen(
+        pool: &SqlitePool,
+        username: &str,
+        last_seen: &str,
+    ) -> Result<()> {
         sqlx::query("UPDATE contacts SET last_seen = ? WHERE username = ?")
             .bind(last_seen)
             .bind(username)

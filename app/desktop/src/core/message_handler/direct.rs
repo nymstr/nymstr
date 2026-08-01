@@ -14,10 +14,10 @@ use base64::Engine;
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use crate::crypto::mls::{EncryptedMessage, MlsClient, MlsMessageType};
-use crate::crypto::pgp::{ArcPassphrase, ArcSecretKey, PgpKeyManager, PgpSigner};
 use crate::core::db::ContactDb;
 use crate::core::mixnet_client::MixnetService;
+use crate::crypto::mls::{EncryptedMessage, MlsClient, MlsMessageType};
+use crate::crypto::pgp::{ArcPassphrase, ArcSecretKey, PgpKeyManager, PgpSigner};
 
 /// Normalize conversation ID to ensure consistent ordering (alphabetical)
 /// This ensures Alice->Bob and Bob->Alice use the same conversation
@@ -83,11 +83,12 @@ impl DirectMessageHandler {
         let mls_group_id_b64 = base64::engine::general_purpose::STANDARD.encode(mls_group_id);
         sqlx::query(
             "INSERT OR REPLACE INTO conversations (id, mls_group_id)
-             VALUES (?, ?)"
+             VALUES (?, ?)",
         )
         .bind(&conversation_id)
         .bind(&mls_group_id_b64)
-        .execute(&self.db).await
+        .execute(&self.db)
+        .await
         .map_err(|e| anyhow!("Failed to store conversation mapping: {}", e))?;
         log::info!(
             "Stored conversation mapping: {} → MLS group {}",
@@ -100,16 +101,18 @@ impl DirectMessageHandler {
     /// Look up the real MLS group ID for a conversation
     async fn get_mls_group_id(&self, recipient: &str) -> Result<Vec<u8>> {
         let conversation_id = normalize_conversation_id(&self.current_user, recipient);
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT mls_group_id FROM conversations WHERE id = ?"
-        )
-        .bind(&conversation_id)
-        .fetch_optional(&self.db).await
-        .map_err(|e| anyhow!("Failed to query conversation: {}", e))?;
+        let result: Option<(String,)> =
+            sqlx::query_as("SELECT mls_group_id FROM conversations WHERE id = ?")
+                .bind(&conversation_id)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| anyhow!("Failed to query conversation: {}", e))?;
 
         let mls_group_id_b64 = result
-            .ok_or_else(|| anyhow!("No conversation found with {}", recipient))?.0;
-        base64::engine::general_purpose::STANDARD.decode(&mls_group_id_b64)
+            .ok_or_else(|| anyhow!("No conversation found with {}", recipient))?
+            .0;
+        base64::engine::general_purpose::STANDARD
+            .decode(&mls_group_id_b64)
             .map_err(|e| anyhow!("Invalid MLS group ID: {}", e))
     }
 
@@ -143,7 +146,10 @@ impl DirectMessageHandler {
 
     /// Initiate MLS conversation with recipient
     /// Returns the welcome message to send to recipient
-    pub async fn establish_conversation(&self, recipient_key_package_b64: &str) -> Result<(String, Vec<u8>)> {
+    pub async fn establish_conversation(
+        &self,
+        recipient_key_package_b64: &str,
+    ) -> Result<(String, Vec<u8>)> {
         log::info!(
             "Establishing MLS conversation between {} and recipient",
             self.current_user
@@ -155,7 +161,10 @@ impl DirectMessageHandler {
             .map_err(|e| anyhow!("Invalid key package base64: {}", e))?;
 
         // Start the conversation (creates MLS group and adds recipient)
-        let conversation_info = self.mls_client.start_conversation(&recipient_key_package).await?;
+        let conversation_info = self
+            .mls_client
+            .start_conversation(&recipient_key_package)
+            .await?;
 
         // Get the welcome message
         let welcome_b64 = self.mls_client.create_welcome_message(&conversation_info)?;
@@ -188,7 +197,11 @@ impl DirectMessageHandler {
 
     /// Sign a message with PGP key
     fn sign_message(&self, content: &str) -> Result<String> {
-        PgpSigner::sign_detached_secure(&self.pgp_secret_key, content.as_bytes(), &self.pgp_passphrase)
+        PgpSigner::sign_detached_secure(
+            &self.pgp_secret_key,
+            content.as_bytes(),
+            &self.pgp_passphrase,
+        )
     }
 
     /// Seal an inner payload with sealed sender and send to recipient.
@@ -343,7 +356,8 @@ impl DirectMessageHandler {
                     base64::engine::general_purpose::STANDARD.encode(&mls_group_id);
 
                 // Store the conversation mapping so we can decrypt future messages
-                self.store_conversation_mapping(sender, &mls_group_id).await?;
+                self.store_conversation_mapping(sender, &mls_group_id)
+                    .await?;
 
                 log::info!(
                     "Joined conversation {} from Welcome message and stored mapping",
@@ -355,7 +369,8 @@ impl DirectMessageHandler {
                 // Process commit to advance epoch
                 log::info!("Processing Commit message from {}", sender);
                 let mls_group_id = self.get_mls_group_id(sender).await?;
-                let mls_group_id_b64 = base64::engine::general_purpose::STANDARD.encode(&mls_group_id);
+                let mls_group_id_b64 =
+                    base64::engine::general_purpose::STANDARD.encode(&mls_group_id);
                 let new_epoch = self
                     .mls_client
                     .process_commit(&mls_group_id_b64, &mls_message_bytes)?;
@@ -467,14 +482,16 @@ impl DirectMessageHandler {
 
         // Establish the conversation using their key package
         // start_conversation() no longer applies the pending commit
-        let (welcome_b64, mls_group_id, commit_b64, ratchet_tree_b64) =
-            self.establish_conversation_deferred(recipient_key_package).await?;
+        let (welcome_b64, mls_group_id, commit_b64, ratchet_tree_b64) = self
+            .establish_conversation_deferred(recipient_key_package)
+            .await?;
 
         // Use the normalized conversation ID as the groupId in the welcome payload
         let conversation_id = normalize_conversation_id(&self.current_user, recipient);
 
         // Store pending handshake — do NOT store conversation mapping yet
-        self.store_pending_handshake(recipient, &mls_group_id, &conversation_id).await?;
+        self.store_pending_handshake(recipient, &mls_group_id, &conversation_id)
+            .await?;
 
         // Build sealed welcome payload. The `inner_action` field tells the recipient
         // how to dispatch this after unsealing. Sender identity is carried inside the
@@ -514,24 +531,34 @@ impl DirectMessageHandler {
             .decode(recipient_key_package_b64)
             .map_err(|e| anyhow!("Invalid key package base64: {}", e))?;
 
-        let conversation_info = self.mls_client.start_conversation(&recipient_key_package).await?;
+        let conversation_info = self
+            .mls_client
+            .start_conversation(&recipient_key_package)
+            .await?;
 
         let welcome_b64 = self.mls_client.create_welcome_message(&conversation_info)?;
 
-        let commit_b64 = conversation_info.commit_message.as_ref().map(|bytes| {
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        });
+        let commit_b64 = conversation_info
+            .commit_message
+            .as_ref()
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
-        let ratchet_tree_b64 = conversation_info.ratchet_tree.as_ref().map(|bytes| {
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        });
+        let ratchet_tree_b64 = conversation_info
+            .ratchet_tree
+            .as_ref()
+            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
 
         log::info!(
             "MLS conversation created (deferred), group ID: {}",
             base64::engine::general_purpose::STANDARD.encode(&conversation_info.conversation_id)
         );
 
-        Ok((welcome_b64, conversation_info.conversation_id, commit_b64, ratchet_tree_b64))
+        Ok((
+            welcome_b64,
+            conversation_info.conversation_id,
+            commit_b64,
+            ratchet_tree_b64,
+        ))
     }
 
     // ========== Pending Handshake DB Helpers ==========
@@ -553,17 +580,22 @@ impl DirectMessageHandler {
         .bind(conversation_id)
         .execute(&self.db).await
         .map_err(|e| anyhow!("Failed to store pending handshake: {}", e))?;
-        log::info!("Stored pending handshake for {} (group: {})", recipient, mls_group_id_b64);
+        log::info!(
+            "Stored pending handshake for {} (group: {})",
+            recipient,
+            mls_group_id_b64
+        );
         Ok(())
     }
 
     /// Retrieve a pending handshake record for a recipient
     async fn get_pending_handshake(&self, recipient: &str) -> Result<(String, String)> {
         let result: Option<(String, String)> = sqlx::query_as(
-            "SELECT mls_group_id, conversation_id FROM pending_handshakes WHERE recipient = ?"
+            "SELECT mls_group_id, conversation_id FROM pending_handshakes WHERE recipient = ?",
         )
         .bind(recipient)
-        .fetch_optional(&self.db).await
+        .fetch_optional(&self.db)
+        .await
         .map_err(|e| anyhow!("Failed to query pending handshake: {}", e))?;
 
         result.ok_or_else(|| anyhow!("No pending handshake found for {}", recipient))
@@ -573,7 +605,8 @@ impl DirectMessageHandler {
     async fn delete_pending_handshake(&self, recipient: &str) -> Result<()> {
         sqlx::query("DELETE FROM pending_handshakes WHERE recipient = ?")
             .bind(recipient)
-            .execute(&self.db).await
+            .execute(&self.db)
+            .await
             .map_err(|e| anyhow!("Failed to delete pending handshake: {}", e))?;
         Ok(())
     }
@@ -581,7 +614,11 @@ impl DirectMessageHandler {
     /// Finalize handshake after receiving p2pWelcomeAck.
     /// Applies the pending commit and stores the conversation mapping.
     pub async fn finalize_handshake(&self, recipient: &str) -> Result<()> {
-        log::info!("Finalizing handshake with {} for user {}", recipient, self.current_user);
+        log::info!(
+            "Finalizing handshake with {} for user {}",
+            recipient,
+            self.current_user
+        );
 
         let (mls_group_id_b64, conversation_id) = self.get_pending_handshake(recipient).await?;
         let mls_group_id = base64::engine::general_purpose::STANDARD
@@ -589,17 +626,22 @@ impl DirectMessageHandler {
             .map_err(|e| anyhow!("Invalid MLS group ID: {}", e))?;
 
         // Apply the deferred pending commit
-        let new_epoch = self.mls_client.apply_pending_commit_for_group(&mls_group_id)?;
+        let new_epoch = self
+            .mls_client
+            .apply_pending_commit_for_group(&mls_group_id)?;
 
         // Now store the conversation mapping
-        self.store_conversation_mapping(recipient, &mls_group_id).await?;
+        self.store_conversation_mapping(recipient, &mls_group_id)
+            .await?;
 
         // Clean up pending handshake
         self.delete_pending_handshake(recipient).await?;
 
         log::info!(
             "Handshake finalized with {}, conversation: {}, epoch: {}",
-            recipient, conversation_id, new_epoch
+            recipient,
+            conversation_id,
+            new_epoch
         );
         Ok(())
     }
@@ -626,7 +668,11 @@ impl DirectMessageHandler {
 
         self.seal_and_send(recipient, inner_payload).await?;
 
-        log::info!("Sent sealed p2pWelcomeAck to {} (accepted={})", recipient, accepted);
+        log::info!(
+            "Sent sealed p2pWelcomeAck to {} (accepted={})",
+            recipient,
+            accepted
+        );
         Ok(())
     }
 }

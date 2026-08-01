@@ -81,23 +81,19 @@ impl UserDb {
 
     /// Check if a user exists
     pub async fn user_exists(pool: &SqlitePool, username: &str) -> Result<bool> {
-        let row: Option<(i64,)> = sqlx::query_as(
-            "SELECT COUNT(*) FROM users WHERE username = ?",
-        )
-        .bind(username)
-        .fetch_optional(pool)
-        .await?;
+        let row: Option<(i64,)> = sqlx::query_as("SELECT COUNT(*) FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_optional(pool)
+            .await?;
 
         Ok(row.map(|(count,)| count > 0).unwrap_or(false))
     }
 
     /// Get the first registered user (for auto-login scenarios)
     pub async fn get_first_user(pool: &SqlitePool) -> Result<Option<UserDTO>> {
-        let row = sqlx::query(
-            r#"SELECT username, display_name, public_key FROM users LIMIT 1"#,
-        )
-        .fetch_optional(pool)
-        .await?;
+        let row = sqlx::query(r#"SELECT username, display_name, public_key FROM users LIMIT 1"#)
+            .fetch_optional(pool)
+            .await?;
 
         match row {
             Some(r) => Ok(Some(UserDTO {

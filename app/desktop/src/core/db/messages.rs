@@ -129,7 +129,11 @@ impl MessageDb {
     }
 
     /// Update message status
-    pub async fn update_status(pool: &SqlitePool, msg_id: &str, status: &MessageStatus) -> Result<()> {
+    pub async fn update_status(
+        pool: &SqlitePool,
+        msg_id: &str,
+        status: &MessageStatus,
+    ) -> Result<()> {
         sqlx::query("UPDATE messages SET status = ? WHERE id = ?")
             .bind(status_to_string(status))
             .bind(msg_id)
@@ -271,13 +275,11 @@ impl MessageDb {
 
     /// Mark a buffered message as failed with error
     pub async fn mark_buffered_failed(pool: &SqlitePool, id: i64, error: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE pending_mls_messages SET failed = 1, error_message = ? WHERE id = ?",
-        )
-        .bind(error)
-        .bind(id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE pending_mls_messages SET failed = 1, error_message = ? WHERE id = ?")
+            .bind(error)
+            .bind(id)
+            .execute(pool)
+            .await?;
 
         Ok(())
     }

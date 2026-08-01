@@ -140,12 +140,18 @@ impl MessageDTOBuilder {
 
     /// Create an outgoing message builder
     pub fn outgoing() -> Self {
-        Self::new().is_own(true).is_read(true).status(MessageStatus::Sent)
+        Self::new()
+            .is_own(true)
+            .is_read(true)
+            .status(MessageStatus::Sent)
     }
 
     /// Create an incoming message builder
     pub fn incoming() -> Self {
-        Self::new().is_own(false).is_read(false).status(MessageStatus::Delivered)
+        Self::new()
+            .is_own(false)
+            .is_read(false)
+            .status(MessageStatus::Delivered)
     }
 
     /// Set the is_read flag

@@ -22,10 +22,11 @@ use crate::state::AppState;
 
 /// Initialize logging
 fn init_logging() {
-    let filter = EnvFilter::from_default_env()
-        .add_directive("nymstr_app_v2=info".parse().unwrap_or_else(|_| {
-            tracing_subscriber::filter::LevelFilter::INFO.into()
-        }));
+    let filter = EnvFilter::from_default_env().add_directive(
+        "nymstr_app_v2=info"
+            .parse()
+            .unwrap_or_else(|_| tracing_subscriber::filter::LevelFilter::INFO.into()),
+    );
 
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -116,6 +117,9 @@ pub fn run() {
             commands::accept_contact_request,
             commands::deny_contact_request,
             commands::deny_welcome,
+            // Transparency-log (federation) commands
+            commands::publish_identity,
+            commands::verify_identity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

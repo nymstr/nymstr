@@ -40,8 +40,7 @@ impl KeyPackageManager {
     /// Generate a key package for this client using MLS client
     pub fn generate_key_package(&self, mls_client: &MlsClient) -> Result<String> {
         let key_package_bytes = mls_client.generate_key_package()?;
-        let key_package_b64 =
-            base64::engine::general_purpose::STANDARD.encode(&key_package_bytes);
+        let key_package_b64 = base64::engine::general_purpose::STANDARD.encode(&key_package_bytes);
         Ok(key_package_b64)
     }
 

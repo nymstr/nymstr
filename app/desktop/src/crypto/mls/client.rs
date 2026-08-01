@@ -23,7 +23,9 @@ use mls_rs_core::identity::{
 };
 use mls_rs_core::time::MlsTime;
 use mls_rs_crypto_openssl::OpensslCryptoProvider;
-use mls_rs_provider_sqlite::{connection_strategy::FileConnectionStrategy, SqLiteDataStorageEngine};
+use mls_rs_provider_sqlite::{
+    connection_strategy::FileConnectionStrategy, SqLiteDataStorageEngine,
+};
 use pgp::composed::{SignedPublicKey, SignedSecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -32,9 +34,8 @@ use std::sync::Arc;
 use std::{fs, path::PathBuf};
 
 use super::types::{
-    ConversationInfo, ConversationType,
-    MlsAddMemberResult, MlsCredential as NymstrMlsCredential, MlsGroupInfo, MlsGroupInfoPublic,
-    MlsRemoveMemberResult, MlsWelcome,
+    ConversationInfo, ConversationType, MlsAddMemberResult, MlsCredential as NymstrMlsCredential,
+    MlsGroupInfo, MlsGroupInfoPublic, MlsRemoveMemberResult, MlsWelcome,
 };
 use crate::crypto::pgp::{PgpKeyManager, PgpSigner, SecurePassphrase};
 
@@ -151,10 +152,7 @@ impl MlsKeyManager {
     ) -> Result<(SignatureSecretKey, SignaturePublicKey)> {
         // Try to load existing keys first
         if Self::keys_exist(username, base_dir) {
-            log::info!(
-                "Loading existing MLS signature keys for user: {}",
-                username
-            );
+            log::info!("Loading existing MLS signature keys for user: {}", username);
             if let Ok(keys) = Self::load_keys_secure(username, passphrase, base_dir) {
                 return Ok(keys);
             }
@@ -165,10 +163,7 @@ impl MlsKeyManager {
         }
 
         // Generate new keys
-        log::info!(
-            "Generating new MLS signature keys for user: {}",
-            username
-        );
+        log::info!("Generating new MLS signature keys for user: {}", username);
         let (secret_key, public_key) = cipher_suite_provider
             .signature_key_generate()
             .map_err(|e| anyhow!("Failed to generate MLS signature keys: {:?}", e))?;
@@ -426,7 +421,10 @@ impl MlsClient {
     }
 
     /// Start a 1:1 conversation (creates a 2-person MLS group)
-    pub async fn start_conversation(&self, recipient_key_package: &[u8]) -> Result<ConversationInfo> {
+    pub async fn start_conversation(
+        &self,
+        recipient_key_package: &[u8],
+    ) -> Result<ConversationInfo> {
         log::info!("Starting conversation for user {}", self.identity);
 
         // Parse recipient's key package
@@ -462,7 +460,9 @@ impl MlsClient {
             .map_err(|e| anyhow!("Failed to save group state: {}", e))?;
 
         // Export ratchet tree for the welcome recipient
-        let exported_tree = group.export_tree().to_bytes()
+        let exported_tree = group
+            .export_tree()
+            .to_bytes()
             .map_err(|e| anyhow!("Failed to export ratchet tree: {}", e))?;
 
         // Serialize commit message for deferred application
@@ -571,9 +571,12 @@ impl MlsClient {
             )
         })?;
 
-        group
-            .write_to_storage()
-            .map_err(|e| anyhow!("Failed to save group state after applying pending commit: {}", e))?;
+        group.write_to_storage().map_err(|e| {
+            anyhow!(
+                "Failed to save group state after applying pending commit: {}",
+                e
+            )
+        })?;
 
         let epoch = group.current_epoch();
         log::info!(
@@ -591,8 +594,7 @@ impl MlsClient {
         conversation_id: &[u8],
         plaintext: &[u8],
     ) -> Result<super::types::EncryptedMessage> {
-        let conversation_id_str =
-            base64::engine::general_purpose::STANDARD.encode(conversation_id);
+        let conversation_id_str = base64::engine::general_purpose::STANDARD.encode(conversation_id);
         log::info!(
             "Encrypting message for user {} in conversation {}",
             self.identity,
@@ -753,8 +755,7 @@ impl MlsClient {
         conversation_id: &[u8],
         key_package_bytes: &[u8],
     ) -> Result<super::types::EncryptedMessage> {
-        let conversation_id_str =
-            base64::engine::general_purpose::STANDARD.encode(conversation_id);
+        let conversation_id_str = base64::engine::general_purpose::STANDARD.encode(conversation_id);
         log::info!(
             "Adding member for user {} in conversation {}",
             self.identity,
@@ -875,11 +876,8 @@ impl MlsClient {
         let pgp_public_key_bytes = pgp_public_key_armored.as_bytes();
         let mls_signature_key = self.signing_identity.signature_key.as_bytes().to_vec();
 
-        let credential = NymstrMlsCredential::new(
-            &self.identity,
-            pgp_public_key_bytes,
-            mls_signature_key,
-        )?;
+        let credential =
+            NymstrMlsCredential::new(&self.identity, pgp_public_key_bytes, mls_signature_key)?;
 
         log::info!(
             "Created MLS credential for user: {} (fingerprint: {}, expires in {} seconds)",
@@ -1007,7 +1005,9 @@ impl MlsClient {
             .map_err(|e| anyhow!("Failed to save group state: {}", e))?;
 
         // Export ratchet tree for the welcome recipient
-        let exported_tree_bytes = group.export_tree().to_bytes()
+        let exported_tree_bytes = group
+            .export_tree()
+            .to_bytes()
             .map_err(|e| anyhow!("Failed to export ratchet tree: {}", e))?;
 
         if commit_result.welcome_messages.is_empty() {
@@ -1075,7 +1075,8 @@ impl MlsClient {
             let credential = &member.signing_identity.credential;
             if let Some(custom_cred) = credential.as_custom() {
                 if custom_cred.credential_type == PgpCredential::credential_type() {
-                    if let Ok(pgp_cred) = serde_json::from_slice::<PgpCredential>(&custom_cred.data) {
+                    if let Ok(pgp_cred) = serde_json::from_slice::<PgpCredential>(&custom_cred.data)
+                    {
                         if pgp_cred.user_id == member_username {
                             member_index = Some(member.index);
                             break;
@@ -1126,7 +1127,11 @@ impl MlsClient {
             self.identity
         );
 
-        Ok(MlsRemoveMemberResult::new(&commit_bytes, epoch, member_username))
+        Ok(MlsRemoveMemberResult::new(
+            &commit_bytes,
+            epoch,
+            member_username,
+        ))
     }
 
     /// Get the current epoch of a group

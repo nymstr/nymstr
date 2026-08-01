@@ -18,6 +18,6 @@ pub use utils::Crypto;
 
 // Re-export MLS types
 pub use mls::{
-    EncryptedMessage, MlsClient, MlsCredential, MlsMessageType, KeyPackageManager,
-    ConversationInfo, ConversationType,
+    ConversationInfo, ConversationType, EncryptedMessage, KeyPackageManager, MlsClient,
+    MlsCredential, MlsMessageType,
 };

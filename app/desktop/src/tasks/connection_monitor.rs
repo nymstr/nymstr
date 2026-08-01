@@ -22,10 +22,7 @@ const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 /// - Checks if mixnet connection is healthy
 /// - Emits connection status events
 /// - Attempts reconnection if disconnected
-pub fn start_connection_monitor(
-    app_handle: AppHandle,
-    state: Arc<AppState>,
-) -> JoinHandle<()> {
+pub fn start_connection_monitor(app_handle: AppHandle, state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("Connection monitor started");
         let emitter = EventEmitter::new(app_handle.clone());
@@ -92,7 +89,10 @@ async fn attempt_reconnection(state: &Arc<AppState>) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tracing::info!("Attempting to reconnect to mixnet for user {}", current_user.username);
+    tracing::info!(
+        "Attempting to reconnect to mixnet for user {}",
+        current_user.username
+    );
 
     // Get storage directory for the user
     let storage_dir = state.get_mixnet_storage_dir(&current_user.username);
@@ -111,7 +111,9 @@ async fn attempt_reconnection(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     // Update state
     state.set_mixnet_service(Arc::new(service), rx).await;
-    state.set_connection_status(true, Some(address.clone())).await;
+    state
+        .set_connection_status(true, Some(address.clone()))
+        .await;
 
     tracing::info!("Reconnected to mixnet with address: {}", address);
 

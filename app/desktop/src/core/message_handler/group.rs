@@ -111,7 +111,8 @@ impl GroupMessageHandler {
             "register:{}:{}:{}",
             username, group_server_address, timestamp
         );
-        let signature = PgpSigner::sign_detached_secure(secret_key, sign_content.as_bytes(), &passphrase)?;
+        let signature =
+            PgpSigner::sign_detached_secure(secret_key, sign_content.as_bytes(), &passphrase)?;
 
         self.service
             .register_with_group_server(
@@ -145,16 +146,15 @@ impl GroupMessageHandler {
             .ok_or_else(|| anyhow!("No user logged in"))?;
 
         // Get PGP keys for signing
-        let (secret_key, passphrase) =
-            match (&self.pgp_secret_key, &self.pgp_passphrase) {
-                (Some(sk), Some(pp)) => {
-                    (Arc::clone(sk), Arc::clone(pp))
-                }
-                _ => return Err(anyhow!("PGP keys not available")),
-            };
+        let (secret_key, passphrase) = match (&self.pgp_secret_key, &self.pgp_passphrase) {
+            (Some(sk), Some(pp)) => (Arc::clone(sk), Arc::clone(pp)),
+            _ => return Err(anyhow!("PGP keys not available")),
+        };
 
         // Use shared MLS client
-        let mls_client = self.mls_client.as_ref()
+        let mls_client = self
+            .mls_client
+            .as_ref()
             .ok_or_else(|| anyhow!("MLS client not available"))?;
 
         // Look up the actual MLS group ID from the database
@@ -180,13 +180,17 @@ impl GroupMessageHandler {
         let ciphertext = base64::engine::general_purpose::STANDARD.encode(&encrypted.mls_message);
 
         // Sign the ciphertext with PGP key
-        let signature = PgpSigner::sign_detached_secure(&secret_key, ciphertext.as_bytes(), &passphrase)?;
+        let signature =
+            PgpSigner::sign_detached_secure(&secret_key, ciphertext.as_bytes(), &passphrase)?;
 
         // Send the encrypted message to the group server
         self.service
             .send_group_message(sender, &ciphertext, &signature, group_server_address)
             .await?;
-        log::info!("Sent MLS-encrypted message to group {}", group_server_address);
+        log::info!(
+            "Sent MLS-encrypted message to group {}",
+            group_server_address
+        );
         Ok(())
     }
 
@@ -201,16 +205,17 @@ impl GroupMessageHandler {
         let last_seen_id = self.get_group_cursor(user, group_server_address).await?;
 
         // Sign the lastSeenId for authentication
-        let signature =
-            if let (Some(secret_key), Some(passphrase)) = (&self.pgp_secret_key, &self.pgp_passphrase) {
-                PgpSigner::sign_detached_secure(
-                    secret_key,
-                    last_seen_id.to_string().as_bytes(),
-                    passphrase,
-                )?
-            } else {
-                return Err(anyhow!("PGP keys not available for signing"));
-            };
+        let signature = if let (Some(secret_key), Some(passphrase)) =
+            (&self.pgp_secret_key, &self.pgp_passphrase)
+        {
+            PgpSigner::sign_detached_secure(
+                secret_key,
+                last_seen_id.to_string().as_bytes(),
+                passphrase,
+            )?
+        } else {
+            return Err(anyhow!("PGP keys not available for signing"));
+        };
 
         // Send fetch request
         self.service
@@ -231,13 +236,14 @@ impl GroupMessageHandler {
         user: &str,
         group_server_address: &str,
     ) -> Result<Option<String>> {
-        let result: Option<(String,)> =
-            sqlx::query_as("SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?")
-                .bind(group_server_address)
-                .bind(user)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| anyhow!("Failed to query MLS group ID: {}", e))?;
+        let result: Option<(String,)> = sqlx::query_as(
+            "SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?",
+        )
+        .bind(group_server_address)
+        .bind(user)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| anyhow!("Failed to query MLS group ID: {}", e))?;
 
         Ok(result.map(|(id,)| id))
     }
@@ -408,5 +414,4 @@ impl GroupMessageHandler {
             }
         }
     }
-
 }

@@ -36,8 +36,9 @@ pub async fn discover_groups(state: State<'_, AppState>) -> Result<Vec<GroupDTO>
     // Sign the query request
     let timestamp = Utc::now().timestamp();
     let sign_content = format!("queryGroups:{}:{}", current_user.username, timestamp);
-    let _signature = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
+    let _signature =
+        PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
 
     // Send query request to server (the response will come async via mixnet)
     // For now, we return groups from local database
@@ -66,7 +67,9 @@ pub async fn discover_groups(state: State<'_, AppState>) -> Result<Vec<GroupDTO>
         .collect();
 
     // Also try to send a discovery query (fire and forget)
-    let _ = service.set_server_address(state.get_server_address().await).await;
+    let _ = service
+        .set_server_address(state.get_server_address().await)
+        .await;
     // Note: The actual discovery response will be handled via the message router
 
     Ok(result)
@@ -107,8 +110,9 @@ pub async fn join_group(
         "register:{}:{}:{}",
         current_user.username, group_address, timestamp
     );
-    let signature = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
+    let signature =
+        PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
 
     // Generate MLS KeyPackage for joining
     let mls_client = MlsClient::new(
@@ -260,13 +264,14 @@ pub async fn send_group_message(
         .ok_or_else(|| ApiError::internal("PGP keys not available"))?;
 
     // Look up the MLS group ID for this server address (scoped to current user)
-    let mls_group_id: Option<(String,)> =
-        sqlx::query_as("SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?")
-            .bind(&group_address)
-            .bind(&current_user.username)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| ApiError::internal(format!("Failed to query MLS group: {}", e)))?;
+    let mls_group_id: Option<(String,)> = sqlx::query_as(
+        "SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?",
+    )
+    .bind(&group_address)
+    .bind(&current_user.username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to query MLS group: {}", e)))?;
 
     let mls_group_id = mls_group_id
         .and_then(|(id,)| if id.is_empty() { None } else { Some(id) })
@@ -302,12 +307,18 @@ pub async fn send_group_message(
     let ciphertext = base64::engine::general_purpose::STANDARD.encode(&encrypted.mls_message);
 
     // Sign the ciphertext
-    let signature = PgpSigner::sign_detached_secure(&secret_key, ciphertext.as_bytes(), &passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign message: {}", e)))?;
+    let signature =
+        PgpSigner::sign_detached_secure(&secret_key, ciphertext.as_bytes(), &passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign message: {}", e)))?;
 
     // Send to group server
     service
-        .send_group_message(&current_user.username, &ciphertext, &signature, &group_address)
+        .send_group_message(
+            &current_user.username,
+            &ciphertext,
+            &signature,
+            &group_address,
+        )
         .await
         .map_err(|e| ApiError::internal(format!("Failed to send message: {}", e)))?;
 
@@ -386,14 +397,15 @@ pub async fn fetch_group_messages(
 
     // Try to sync epoch before fetching (best effort, non-blocking)
     // This helps catch up on any missed commits when group membership changed
-    let mls_group_id: Option<(String,)> =
-        sqlx::query_as("SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?")
-            .bind(&group_address)
-            .bind(&current_user.username)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let mls_group_id: Option<(String,)> = sqlx::query_as(
+        "SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?",
+    )
+    .bind(&group_address)
+    .bind(&current_user.username)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
     if let Some((mls_group_id,)) = mls_group_id {
         if !mls_group_id.is_empty() {
@@ -408,14 +420,23 @@ pub async fn fetch_group_messages(
                     state.app_dir.clone(),
                 ) {
                     // Decode MLS group ID to bytes to check if group exists
-                    if let Ok(group_id_bytes) = base64::engine::general_purpose::STANDARD.decode(&mls_group_id) {
+                    if let Ok(group_id_bytes) =
+                        base64::engine::general_purpose::STANDARD.decode(&mls_group_id)
+                    {
                         if mls_client.group_exists(&group_id_bytes) {
                             // Sign commit sync request: "groupId:sinceId"
                             // We request from id 0 to get all commits, MLS will handle deduplication
                             let since_id = 0i64; // Request all commits from the beginning
                             let sign_content = format!("{}:{}", mls_group_id, since_id);
-                            if let Ok(sync_sig) = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase) {
-                                tracing::debug!("Sending commit sync request for group {} before fetch", group_address);
+                            if let Ok(sync_sig) = PgpSigner::sign_detached_secure(
+                                &secret_key,
+                                sign_content.as_bytes(),
+                                &passphrase,
+                            ) {
+                                tracing::debug!(
+                                    "Sending commit sync request for group {} before fetch",
+                                    group_address
+                                );
                                 let _ = service
                                     .sync_epoch_from_server(
                                         &current_user.username,
@@ -455,57 +476,58 @@ pub async fn fetch_group_messages(
     // The new messages will be received via the message router and stored
     let limit = limit.unwrap_or(50).min(100);
 
-    let messages: Vec<(String, String, String, String, String, bool, bool)> = if let Some(before) =
-        before_id
-    {
-        sqlx::query_as(
-            r#"
+    let messages: Vec<(String, String, String, String, String, bool, bool)> =
+        if let Some(before) = before_id {
+            sqlx::query_as(
+                r#"
             SELECT id, sender, content, timestamp, status, is_own, is_read
             FROM messages
             WHERE conversation_id = ? AND id < ?
             ORDER BY timestamp DESC
             LIMIT ?
             "#,
-        )
-        .bind(&group_address)
-        .bind(&before)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-    } else {
-        sqlx::query_as(
-            r#"
+            )
+            .bind(&group_address)
+            .bind(&before)
+            .bind(limit)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+        } else {
+            sqlx::query_as(
+                r#"
             SELECT id, sender, content, timestamp, status, is_own, is_read
             FROM messages
             WHERE conversation_id = ?
             ORDER BY timestamp DESC
             LIMIT ?
             "#,
-        )
-        .bind(&group_address)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?
-    };
+            )
+            .bind(&group_address)
+            .bind(limit)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?
+        };
 
     let mut result: Vec<MessageDTO> = messages
         .into_iter()
-        .map(|(id, sender, content, timestamp, status, is_own, is_read)| MessageDTO {
-            id,
-            sender,
-            content,
-            timestamp,
-            status: match status.as_str() {
-                "pending" => MessageStatus::Pending,
-                "sent" => MessageStatus::Sent,
-                "delivered" => MessageStatus::Delivered,
-                _ => MessageStatus::Failed,
+        .map(
+            |(id, sender, content, timestamp, status, is_own, is_read)| MessageDTO {
+                id,
+                sender,
+                content,
+                timestamp,
+                status: match status.as_str() {
+                    "pending" => MessageStatus::Pending,
+                    "sent" => MessageStatus::Sent,
+                    "delivered" => MessageStatus::Delivered,
+                    _ => MessageStatus::Failed,
+                },
+                is_own,
+                is_read,
             },
-            is_own,
-            is_read,
-        })
+        )
         .collect();
 
     result.reverse();
@@ -575,8 +597,9 @@ pub async fn init_group(
         "register:{}:{}:{}",
         current_user.username, group_address, timestamp
     );
-    let signature = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
+    let signature =
+        PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
 
     // Register with the group server (without KeyPackage since admin creates the group)
     service
@@ -604,46 +627,47 @@ pub async fn init_group(
     .await
     .map_err(|e| ApiError::internal(format!("Failed to check existing group: {}", e)))?;
 
-    let group = if let Some((id, name, address, member_count, is_public, description)) = existing_group {
-        // Group already exists, use existing entry
-        tracing::info!("Group {} already exists with id {}", group_address, id);
-        GroupDTO {
-            id,
-            name,
-            address,
-            member_count: member_count as u32,
-            is_public,
-            description,
-        }
-    } else {
-        // Create new group entry
-        let new_group = GroupDTO {
-            id: Uuid::new_v4().to_string(),
-            name: display_name.clone(),
-            address: group_address.clone(),
-            member_count: 1,
-            is_public: true,
-            description: None,
-        };
+    let group =
+        if let Some((id, name, address, member_count, is_public, description)) = existing_group {
+            // Group already exists, use existing entry
+            tracing::info!("Group {} already exists with id {}", group_address, id);
+            GroupDTO {
+                id,
+                name,
+                address,
+                member_count: member_count as u32,
+                is_public,
+                description,
+            }
+        } else {
+            // Create new group entry
+            let new_group = GroupDTO {
+                id: Uuid::new_v4().to_string(),
+                name: display_name.clone(),
+                address: group_address.clone(),
+                member_count: 1,
+                is_public: true,
+                description: None,
+            };
 
-        // Store in groups table
-        sqlx::query(
-            r#"
+            // Store in groups table
+            sqlx::query(
+                r#"
             INSERT INTO groups (id, name, address, member_count, is_public)
             VALUES (?, ?, ?, ?, ?)
             "#,
-        )
-        .bind(&new_group.id)
-        .bind(&new_group.name)
-        .bind(&new_group.address)
-        .bind(new_group.member_count as i64)
-        .bind(new_group.is_public)
-        .execute(&state.db)
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to store group: {}", e)))?;
+            )
+            .bind(&new_group.id)
+            .bind(&new_group.name)
+            .bind(&new_group.address)
+            .bind(new_group.member_count as i64)
+            .bind(new_group.is_public)
+            .execute(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to store group: {}", e)))?;
 
-        new_group
-    };
+            new_group
+        };
 
     // Tables are created by schema::run_migrations() on app startup
     // Store membership with MLS group ID and admin role
@@ -1021,10 +1045,7 @@ async fn wait_for_approval_response(
                                 if let Some(key_package_b64) =
                                     parsed.get("keyPackage").and_then(|v| v.as_str())
                                 {
-                                    tracing::info!(
-                                        "Received KeyPackage for {}",
-                                        member_username
-                                    );
+                                    tracing::info!("Received KeyPackage for {}", member_username);
 
                                     // Process the KeyPackage and add member to MLS group
                                     let result = process_key_package_and_add_member(
@@ -1106,10 +1127,7 @@ pub async fn get_pending_join_requests(
     group_address: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, ApiError> {
-    tracing::info!(
-        "Getting pending join requests for group {}",
-        group_address
-    );
+    tracing::info!("Getting pending join requests for group {}", group_address);
 
     // Get current user (must be admin)
     let current_user = state
@@ -1131,8 +1149,9 @@ pub async fn get_pending_join_requests(
 
     // Sign the query request: "queryPendingUsers"
     let sign_content = "queryPendingUsers";
-    let signature = PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
+    let signature =
+        PgpSigner::sign_detached_secure(&secret_key, sign_content.as_bytes(), &passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign request: {}", e)))?;
 
     // Send query request to group server
     tracing::info!(
@@ -1140,11 +1159,7 @@ pub async fn get_pending_join_requests(
         group_address
     );
     service
-        .query_pending_users(
-            &current_user.username,
-            &signature,
-            &group_address,
-        )
+        .query_pending_users(&current_user.username, &signature, &group_address)
         .await
         .map_err(|e| ApiError::internal(format!("Failed to send query request: {}", e)))?;
 
@@ -1207,10 +1222,7 @@ async fn wait_for_pending_users_response(
                                     })
                                     .unwrap_or_default();
 
-                                tracing::info!(
-                                    "Received {} pending users",
-                                    pending_users.len()
-                                );
+                                tracing::info!("Received {} pending users", pending_users.len());
                                 *state.incoming_rx.write().await = Some(rx);
                                 return Ok(pending_users);
                             } else if let Some(error) = parsed
@@ -1219,15 +1231,15 @@ async fn wait_for_pending_users_response(
                                 .and_then(|v| v.as_str())
                             {
                                 *state.incoming_rx.write().await = Some(rx);
-                                return Err(ApiError::internal(format!(
-                                    "Query failed: {}",
-                                    error
-                                )));
+                                return Err(ApiError::internal(format!("Query failed: {}", error)));
                             }
                         } else {
                             // Try parsing content directly as array
                             if let Ok(users) = serde_json::from_str::<Vec<String>>(content) {
-                                tracing::info!("Received {} pending users (array format)", users.len());
+                                tracing::info!(
+                                    "Received {} pending users (array format)",
+                                    users.len()
+                                );
                                 *state.incoming_rx.write().await = Some(rx);
                                 return Ok(users);
                             }
@@ -1289,13 +1301,14 @@ async fn process_key_package_and_add_member(
         .map_err(|e| ApiError::internal(format!("Failed to decode KeyPackage: {}", e)))?;
 
     // Get the MLS group ID from the database (scoped to admin user)
-    let mls_group_id: Option<(String,)> =
-        sqlx::query_as("SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?")
-            .bind(group_address)
-            .bind(admin_username)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| ApiError::internal(format!("Failed to query MLS group: {}", e)))?;
+    let mls_group_id: Option<(String,)> = sqlx::query_as(
+        "SELECT mls_group_id FROM group_memberships WHERE server_address = ? AND username = ?",
+    )
+    .bind(group_address)
+    .bind(admin_username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ApiError::internal(format!("Failed to query MLS group: {}", e)))?;
 
     let mls_group_id = mls_group_id
         .and_then(|(id,)| if id.is_empty() { None } else { Some(id) })
@@ -1333,8 +1346,9 @@ async fn process_key_package_and_add_member(
 
     // Sign the store welcome request: "groupId:targetUsername"
     let sign_content = format!("{}:{}", group_address, member_username);
-    let welcome_sig = PgpSigner::sign_detached_secure(secret_key, sign_content.as_bytes(), passphrase)
-        .map_err(|e| ApiError::internal(format!("Failed to sign welcome: {}", e)))?;
+    let welcome_sig =
+        PgpSigner::sign_detached_secure(secret_key, sign_content.as_bytes(), passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign welcome: {}", e)))?;
 
     // Store the Welcome on the server for the user to fetch
     service
@@ -1382,10 +1396,7 @@ async fn process_key_package_and_add_member(
     tracing::info!("Waiting for mixnet to transmit Welcome and Commit...");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    tracing::info!(
-        "Approved {} and stored Welcome on server",
-        member_username
-    );
+    tracing::info!("Approved {} and stored Welcome on server", member_username);
 
     Ok(())
 }
@@ -1453,15 +1464,21 @@ pub async fn get_group_members(
 
     let members: Vec<GroupMemberDTO> = rows
         .into_iter()
-        .map(|(username, role, joined_at, credential_verified)| GroupMemberDTO {
-            username,
-            role,
-            joined_at,
-            credential_verified,
-        })
+        .map(
+            |(username, role, joined_at, credential_verified)| GroupMemberDTO {
+                username,
+                role,
+                joined_at,
+                credential_verified,
+            },
+        )
         .collect();
 
-    tracing::debug!("Found {} members for group {}", members.len(), group_address);
+    tracing::debug!(
+        "Found {} members for group {}",
+        members.len(),
+        group_address
+    );
     Ok(members)
 }
 

@@ -491,9 +491,7 @@ impl EpochAwareBuffer {
             .await
             .map_err(|e| anyhow!("Failed to reload pending messages: {}", e))?;
 
-            let queue = buffer
-                .entry(conv_id.clone())
-                .or_insert_with(VecDeque::new);
+            let queue = buffer.entry(conv_id.clone()).or_insert_with(VecDeque::new);
 
             for (id, _, sender, mls_message_b64, received_at, retry_count) in db_pending {
                 // Only load up to MAX_BUFFER_SIZE per conversation

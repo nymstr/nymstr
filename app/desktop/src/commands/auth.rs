@@ -112,17 +112,21 @@ pub async fn register_user(
     let arc_passphrase = Arc::new(secure_passphrase);
 
     // 4. Check if mixnet is connected
-    let mixnet_service = state.get_mixnet_service().await.ok_or_else(|| {
-        ApiError::not_connected("Mixnet not connected. Please connect first.")
-    })?;
+    let mixnet_service = state
+        .get_mixnet_service()
+        .await
+        .ok_or_else(|| ApiError::not_connected("Mixnet not connected. Please connect first."))?;
 
     // 5. Check server address
-    let server_address = state.get_server_address().await.ok_or_else(|| {
-        ApiError::validation("Server address not configured")
-    })?;
+    let server_address = state
+        .get_server_address()
+        .await
+        .ok_or_else(|| ApiError::validation("Server address not configured"))?;
 
     // Ensure mixnet service has server address
-    mixnet_service.set_server_address(Some(server_address.clone())).await;
+    mixnet_service
+        .set_server_address(Some(server_address.clone()))
+        .await;
 
     // 6. Send registration request
     mixnet_service
@@ -134,9 +138,10 @@ pub async fn register_user(
 
     // 7. Wait for challenge and handle response
     // Take the incoming receiver to process messages
-    let mut incoming_rx = state.take_incoming_rx().await.ok_or_else(|| {
-        ApiError::internal("Message receiver not available")
-    })?;
+    let mut incoming_rx = state
+        .take_incoming_rx()
+        .await
+        .ok_or_else(|| ApiError::internal("Message receiver not available"))?;
 
     // Create auth handler for processing challenge
     let auth_handler = AuthenticationHandler::new(
@@ -157,13 +162,23 @@ pub async fn register_user(
                     match action {
                         "challenge" => {
                             // Check if this is a registration challenge
-                            if let Some(context) = env.payload.get("context").and_then(|v| v.as_str()) {
+                            if let Some(context) =
+                                env.payload.get("context").and_then(|v| v.as_str())
+                            {
                                 if context == "registration" {
-                                    if let Some(nonce) = env.payload.get("nonce").and_then(|v| v.as_str()) {
+                                    if let Some(nonce) =
+                                        env.payload.get("nonce").and_then(|v| v.as_str())
+                                    {
                                         tracing::info!("Received registration challenge");
 
-                                        if let Err(e) = auth_handler.process_register_challenge(&username, nonce).await {
-                                            return Err(format!("Failed to process challenge: {}", e));
+                                        if let Err(e) = auth_handler
+                                            .process_register_challenge(&username, nonce)
+                                            .await
+                                        {
+                                            return Err(format!(
+                                                "Failed to process challenge: {}",
+                                                e
+                                            ));
                                         }
                                     }
                                 }
@@ -171,26 +186,56 @@ pub async fn register_user(
                         }
                         "challengeResponse" => {
                             // Check if this is a registration response
-                            if let Some(context) = env.payload.get("context").and_then(|v| v.as_str()) {
+                            if let Some(context) =
+                                env.payload.get("context").and_then(|v| v.as_str())
+                            {
                                 if context == "registration" {
-                                    if let Some(result) = env.payload.get("result").and_then(|v| v.as_str()) {
-                                        match auth_handler.process_register_response(&username, result) {
+                                    if let Some(result) =
+                                        env.payload.get("result").and_then(|v| v.as_str())
+                                    {
+                                        match auth_handler
+                                            .process_register_response(&username, result)
+                                        {
                                             Ok(true) => {
                                                 // Extract server public key from response (TOFU)
-                                                let server_pk = env.payload.get("serverPublicKey")
+                                                let server_pk = env
+                                                    .payload
+                                                    .get("serverPublicKey")
                                                     .and_then(|v| v.as_str())
                                                     .map(String::from)
                                                     .or_else(|| {
                                                         // Legacy format: content may be JSON with serverPublicKey
-                                                        env.payload.get("content")
+                                                        env.payload
+                                                            .get("content")
                                                             .and_then(|v| v.as_str())
-                                                            .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
-                                                            .and_then(|p| p.get("serverPublicKey")?.as_str().map(String::from))
+                                                            .and_then(|c| {
+                                                                serde_json::from_str::<
+                                                                    serde_json::Value,
+                                                                >(
+                                                                    c
+                                                                )
+                                                                .ok()
+                                                            })
+                                                            .and_then(|p| {
+                                                                p.get("serverPublicKey")?
+                                                                    .as_str()
+                                                                    .map(String::from)
+                                                            })
                                                     });
                                                 return Ok(server_pk);
                                             }
-                                            Ok(false) => return Err(format!("Registration failed: {}", result)),
-                                            Err(e) => return Err(format!("Error processing response: {}", e)),
+                                            Ok(false) => {
+                                                return Err(format!(
+                                                    "Registration failed: {}",
+                                                    result
+                                                ))
+                                            }
+                                            Err(e) => {
+                                                return Err(format!(
+                                                    "Error processing response: {}",
+                                                    e
+                                                ))
+                                            }
                                         }
                                     }
                                 }
@@ -218,12 +263,17 @@ pub async fn register_user(
         Ok(Err(e)) => {
             // Put the receiver back on failure
             *state.incoming_rx.write().await = Some(incoming_rx);
-            return Err(ApiError::authentication(format!("Registration failed: {}", e)));
+            return Err(ApiError::authentication(format!(
+                "Registration failed: {}",
+                e
+            )));
         }
         Err(_) => {
             // Put the receiver back on timeout
             *state.incoming_rx.write().await = Some(incoming_rx);
-            return Err(ApiError::timeout("Registration timed out waiting for server response"));
+            return Err(ApiError::timeout(
+                "Registration timed out waiting for server response",
+            ));
         }
     };
 
@@ -233,15 +283,13 @@ pub async fn register_user(
     }
 
     // 8. Store user in database
-    sqlx::query(
-        "INSERT INTO users (username, display_name, public_key) VALUES (?, ?, ?)",
-    )
-    .bind(&username)
-    .bind(&username)
-    .bind(&public_key_armored)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(format!("Failed to store user: {}", e)))?;
+    sqlx::query("INSERT INTO users (username, display_name, public_key) VALUES (?, ?, ?)")
+        .bind(&username)
+        .bind(&username)
+        .bind(&public_key_armored)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to store user: {}", e)))?;
 
     // 9. Set current user and keys in state
     let user = UserDTO {
@@ -252,7 +300,9 @@ pub async fn register_user(
     };
 
     state.set_current_user(Some(user.clone())).await;
-    state.set_pgp_keys(arc_secret_key, arc_public_key, arc_passphrase).await;
+    state
+        .set_pgp_keys(arc_secret_key, arc_public_key, arc_passphrase)
+        .await;
 
     // 10. Initialize MLS client for encrypted messaging
     if let Err(e) = state.initialize_mls_client(&user.username).await {
@@ -294,13 +344,12 @@ pub async fn ping_server(
     tracing::info!("Pinging server for user: {}", username);
 
     // 1. Check if user exists in database
-    let result: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT username, display_name, public_key FROM users WHERE username = ?",
-    )
-    .bind(&username)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let result: Option<(String, String, String)> =
+        sqlx::query_as("SELECT username, display_name, public_key FROM users WHERE username = ?")
+            .bind(&username)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let (db_username, display_name, public_key_armored) =
         result.ok_or_else(|| ApiError::not_found("User not found"))?;
@@ -317,33 +366,36 @@ pub async fn ping_server(
     let arc_passphrase = Arc::new(secure_passphrase);
 
     // Store keys in state
-    state.set_pgp_keys(
-        arc_secret_key.clone(),
-        arc_public_key.clone(),
-        arc_passphrase.clone(),
-    ).await;
+    state
+        .set_pgp_keys(
+            arc_secret_key.clone(),
+            arc_public_key.clone(),
+            arc_passphrase.clone(),
+        )
+        .await;
 
     // 3. Check if mixnet is connected
-    let mixnet_service = state.get_mixnet_service().await.ok_or_else(|| {
-        ApiError::not_connected("Mixnet not connected. Please connect first.")
-    })?;
+    let mixnet_service = state
+        .get_mixnet_service()
+        .await
+        .ok_or_else(|| ApiError::not_connected("Mixnet not connected. Please connect first."))?;
 
     // 4. Check server address
-    let server_address = state.get_server_address().await.ok_or_else(|| {
-        ApiError::validation("Server address not configured")
-    })?;
+    let server_address = state
+        .get_server_address()
+        .await
+        .ok_or_else(|| ApiError::validation("Server address not configured"))?;
 
-    mixnet_service.set_server_address(Some(server_address.clone())).await;
+    mixnet_service
+        .set_server_address(Some(server_address.clone()))
+        .await;
 
     // 5. Sign timestamp and send ping
     let timestamp = chrono::Utc::now().timestamp();
     let sign_content = format!("ping:{}:{}", username, timestamp);
-    let signature = PgpSigner::sign_detached_secure(
-        &arc_secret_key,
-        sign_content.as_bytes(),
-        &arc_passphrase,
-    )
-    .map_err(|e| ApiError::internal(format!("Failed to sign ping: {}", e)))?;
+    let signature =
+        PgpSigner::sign_detached_secure(&arc_secret_key, sign_content.as_bytes(), &arc_passphrase)
+            .map_err(|e| ApiError::internal(format!("Failed to sign ping: {}", e)))?;
 
     mixnet_service
         .send_ping(&username, timestamp, &signature)
@@ -353,9 +405,10 @@ pub async fn ping_server(
     tracing::info!("Ping sent for user: {}", username);
 
     // 6. Wait for pong response
-    let mut incoming_rx = state.take_incoming_rx().await.ok_or_else(|| {
-        ApiError::internal("Message receiver not available")
-    })?;
+    let mut incoming_rx = state
+        .take_incoming_rx()
+        .await
+        .ok_or_else(|| ApiError::internal("Message receiver not available"))?;
 
     let result = tokio::time::timeout(AUTH_TIMEOUT, async {
         loop {
@@ -366,19 +419,26 @@ pub async fn ping_server(
                         if let Some(status) = env.payload.get("status").and_then(|v| v.as_str()) {
                             if status == "success" {
                                 // Extract server time for clock sync
-                                if let Some(server_time) = env.payload.get("serverTime").and_then(|v| v.as_i64()) {
+                                if let Some(server_time) =
+                                    env.payload.get("serverTime").and_then(|v| v.as_i64())
+                                {
                                     tracing::debug!("Server time from pong: {}", server_time);
                                 }
                                 return Ok(());
                             } else {
-                                let error = env.payload.get("error")
+                                let error = env
+                                    .payload
+                                    .get("error")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("unknown error");
                                 return Err(format!("Ping failed: {}", error));
                             }
                         }
                     } else {
-                        tracing::debug!("Ignoring message with action: {} while waiting for pong", env.action);
+                        tracing::debug!(
+                            "Ignoring message with action: {} while waiting for pong",
+                            env.action
+                        );
                     }
                 }
                 None => {
@@ -501,8 +561,7 @@ fn spawn_publish_key_packages(
                 }
             };
 
-            let key_package_b64 =
-                base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+            let key_package_b64 = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
 
             // PGP-sign the raw key package bytes
             let pgp_signature =
@@ -584,8 +643,9 @@ fn save_keys_to_app_dir(
             .map_err(|e| ApiError::internal(format!("Failed to read directory metadata: {}", e)))?
             .permissions();
         dir_perms.set_mode(0o700);
-        fs::set_permissions(key_dir, dir_perms)
-            .map_err(|e| ApiError::internal(format!("Failed to set directory permissions: {}", e)))?;
+        fs::set_permissions(key_dir, dir_perms).map_err(|e| {
+            ApiError::internal(format!("Failed to set directory permissions: {}", e))
+        })?;
     }
 
     // Armor and save secret key
@@ -612,8 +672,9 @@ fn save_keys_to_app_dir(
             .map_err(|e| ApiError::internal(format!("Failed to read secret key metadata: {}", e)))?
             .permissions();
         secret_perms.set_mode(0o600);
-        fs::set_permissions(&secret_path, secret_perms)
-            .map_err(|e| ApiError::internal(format!("Failed to set secret key permissions: {}", e)))?;
+        fs::set_permissions(&secret_path, secret_perms).map_err(|e| {
+            ApiError::internal(format!("Failed to set secret key permissions: {}", e))
+        })?;
     }
 
     // Armor and save public key
@@ -641,7 +702,13 @@ fn save_keys_to_app_dir(
 fn load_keys_from_app_dir(
     key_dir: &std::path::Path,
     passphrase: &SecurePassphrase,
-) -> Result<(pgp::composed::SignedSecretKey, pgp::composed::SignedPublicKey), ApiError> {
+) -> Result<
+    (
+        pgp::composed::SignedSecretKey,
+        pgp::composed::SignedPublicKey,
+    ),
+    ApiError,
+> {
     use hmac::{Hmac, Mac};
     use pgp::composed::Deserializable;
     use sha2::Sha256;

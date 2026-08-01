@@ -93,10 +93,7 @@ impl GroupDb {
     }
 
     /// Get all members of a group
-    pub async fn get_members(
-        pool: &SqlitePool,
-        conversation_id: &str,
-    ) -> Result<Vec<GroupMember>> {
+    pub async fn get_members(pool: &SqlitePool, conversation_id: &str) -> Result<Vec<GroupMember>> {
         let rows = sqlx::query(
             r#"
             SELECT member_username, credential_fingerprint, credential_verified, verified_at, joined_at, role
@@ -163,13 +160,11 @@ impl GroupDb {
         conversation_id: &str,
         member_username: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM group_members WHERE conversation_id = ? AND member_username = ?",
-        )
-        .bind(conversation_id)
-        .bind(member_username)
-        .execute(pool)
-        .await?;
+        sqlx::query("DELETE FROM group_members WHERE conversation_id = ? AND member_username = ?")
+            .bind(conversation_id)
+            .bind(member_username)
+            .execute(pool)
+            .await?;
 
         Ok(())
     }
@@ -451,7 +446,11 @@ impl GroupDb {
             .execute(pool)
             .await?;
 
-        tracing::debug!("Removed group membership: {} from {}", username, server_address);
+        tracing::debug!(
+            "Removed group membership: {} from {}",
+            username,
+            server_address
+        );
         Ok(())
     }
 
@@ -577,7 +576,11 @@ impl GroupDb {
     }
 
     /// Update invite status (accepted/rejected)
-    pub async fn update_invite_status(pool: &SqlitePool, invite_id: i64, status: &str) -> Result<()> {
+    pub async fn update_invite_status(
+        pool: &SqlitePool,
+        invite_id: i64,
+        status: &str,
+    ) -> Result<()> {
         sqlx::query("UPDATE group_invites SET status = ? WHERE id = ?")
             .bind(status)
             .bind(invite_id)

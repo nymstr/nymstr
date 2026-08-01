@@ -53,8 +53,7 @@ impl SecurePassphrase {
 
     /// Read password securely using rpassword (disables terminal echo).
     fn read_password_secure() -> Result<String> {
-        rpassword::read_password()
-            .map_err(|e| anyhow!("Failed to read password: {}", e))
+        rpassword::read_password().map_err(|e| anyhow!("Failed to read password: {}", e))
     }
 
     /// Generate a strong random passphrase (32 alphanumeric characters).

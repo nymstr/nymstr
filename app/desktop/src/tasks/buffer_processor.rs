@@ -35,10 +35,7 @@ const BUFFER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// - Processes successful decryptions
 /// - Removes expired messages (> 5 minutes old)
 /// - Tracks retry counts
-pub fn start_buffer_processor(
-    app_handle: AppHandle,
-    state: Arc<AppState>,
-) -> JoinHandle<()> {
+pub fn start_buffer_processor(app_handle: AppHandle, state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("Buffer processor started");
         let emitter = EventEmitter::new(app_handle.clone());
@@ -58,7 +55,9 @@ pub fn start_buffer_processor(
             };
 
             // Process buffered messages
-            if let Err(e) = process_buffered_messages(&emitter, &state, &current_user.username).await {
+            if let Err(e) =
+                process_buffered_messages(&emitter, &state, &current_user.username).await
+            {
                 tracing::error!("Error processing buffered messages: {}", e);
             }
 
@@ -83,7 +82,10 @@ async fn process_buffered_messages(
         return Ok(());
     }
 
-    tracing::debug!("Processing buffered messages for {} conversations", conversations.len());
+    tracing::debug!(
+        "Processing buffered messages for {} conversations",
+        conversations.len()
+    );
 
     // Get required state
     let mls_client = match state.get_mls_client().await {
@@ -122,7 +124,11 @@ async fn process_buffered_messages(
     // Process each conversation
     for conv_id in conversations {
         if let Err(e) = process_conversation_buffer(emitter, state, &handler, &conv_id).await {
-            tracing::warn!("Error processing buffer for conversation {}: {}", conv_id, e);
+            tracing::warn!(
+                "Error processing buffer for conversation {}: {}",
+                conv_id,
+                e
+            );
         }
     }
 
@@ -142,20 +148,18 @@ async fn process_conversation_buffer(
         return Ok(());
     }
 
-    tracing::debug!("Processing {} buffered messages for conversation {}", messages.len(), conv_id);
+    tracing::debug!(
+        "Processing {} buffered messages for conversation {}",
+        messages.len(),
+        conv_id
+    );
 
     for msg in messages {
         // Check retry count
         if msg.retry_count >= MAX_RETRY_COUNT {
-            tracing::warn!(
-                "Message {} exceeded max retries, marking as failed",
-                msg.id
-            );
-            MessageDb::mark_buffered_failed(
-                &state.db,
-                msg.id,
-                "Exceeded maximum retry attempts",
-            ).await?;
+            tracing::warn!("Message {} exceeded max retries, marking as failed", msg.id);
+            MessageDb::mark_buffered_failed(&state.db, msg.id, "Exceeded maximum retry attempts")
+                .await?;
             continue;
         }
 
@@ -164,7 +168,11 @@ async fn process_conversation_buffer(
 
         // Try to decrypt
         match handler
-            .process_incoming_message(&msg.sender, &msg.mls_message_b64, MlsMessageType::Application)
+            .process_incoming_message(
+                &msg.sender,
+                &msg.mls_message_b64,
+                MlsMessageType::Application,
+            )
             .await
         {
             Ok(Some(content)) => {

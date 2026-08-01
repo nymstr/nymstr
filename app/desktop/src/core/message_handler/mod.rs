@@ -16,6 +16,6 @@ pub mod welcome;
 
 // Re-export commonly used types
 pub use auth::{AuthResult, AuthenticationHandler};
-pub use direct::{DirectMessageHandler, DirectMessageHandlerBuilder, normalize_conversation_id};
+pub use direct::{normalize_conversation_id, DirectMessageHandler, DirectMessageHandlerBuilder};
 pub use group::GroupMessageHandler;
 pub use welcome::{WelcomeFlowHandler, WelcomeFlowResult, WelcomeProcessResult};

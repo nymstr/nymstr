@@ -136,15 +136,20 @@ impl MixnetService {
     /// Create a new MixnetService with persistent storage and connect to the mixnet
     ///
     /// Returns the service and a receiver channel for incoming messages.
-    pub async fn new_with_storage(storage_dir: PathBuf) -> Result<(Self, mpsc::Receiver<Incoming>)> {
-        info!("Building mixnet client with storage at {:?}...", storage_dir);
+    pub async fn new_with_storage(
+        storage_dir: PathBuf,
+    ) -> Result<(Self, mpsc::Receiver<Incoming>)> {
+        info!(
+            "Building mixnet client with storage at {:?}...",
+            storage_dir
+        );
 
         // Ensure storage directory exists
         std::fs::create_dir_all(&storage_dir)?;
 
         // Create StoragePaths from directory
-        let storage_paths = StoragePaths::new_from_dir(&storage_dir)
-            .context("Failed to create storage paths")?;
+        let storage_paths =
+            StoragePaths::new_from_dir(&storage_dir).context("Failed to create storage paths")?;
 
         let client = MixnetClientBuilder::new_with_default_storage(storage_paths)
             .await
@@ -234,7 +239,10 @@ impl MixnetService {
 
     /// Register a known Nym address for a username (for direct P2P messaging)
     pub async fn register_peer_address(&self, username: &str, address: &str) {
-        self.nym_addresses.write().await.insert(username.to_string(), address.to_string());
+        self.nym_addresses
+            .write()
+            .await
+            .insert(username.to_string(), address.to_string());
     }
 
     /// Get a peer's Nym address if known
@@ -254,7 +262,11 @@ impl MixnetService {
     }
 
     /// Send a MixnetMessage to a recipient address
-    pub async fn send_message_to(&self, recipient_address: &str, message: &MixnetMessage) -> Result<()> {
+    pub async fn send_message_to(
+        &self,
+        recipient_address: &str,
+        message: &MixnetMessage,
+    ) -> Result<()> {
         let payload = message.to_json()?;
         let raw_bytes = payload.into_bytes();
         self.send_raw(recipient_address, raw_bytes).await
@@ -262,10 +274,54 @@ impl MixnetService {
 
     /// Send a MixnetMessage to the configured server
     pub async fn send_to_server(&self, message: &MixnetMessage) -> Result<()> {
-        let server_addr = self.server_address.read().await
+        let server_addr = self
+            .server_address
+            .read()
+            .await
             .clone()
             .context("Server address not configured")?;
         self.send_message_to(&server_addr, message).await
+    }
+
+    // ========== Namespace transparency-log (SERVER_SPEC.md §8) ==========
+
+    /// Submit a directory mutation to the transparency log.
+    pub async fn send_submit_mutation(
+        &self,
+        sender: &str,
+        mutation: serde_json::Value,
+    ) -> Result<()> {
+        self.send_to_server(&MixnetMessage::submit_mutation(sender, mutation))
+            .await
+    }
+
+    /// Answer a register-mutation liveness challenge.
+    pub async fn send_submit_mutation_response(&self, sender: &str, signature: &str) -> Result<()> {
+        self.send_to_server(&MixnetMessage::submit_mutation_response(sender, signature))
+            .await
+    }
+
+    /// Request a proof-carrying lookup.
+    pub async fn send_lookup_proof(
+        &self,
+        sender: &str,
+        key: &str,
+        frontier_size: u64,
+    ) -> Result<()> {
+        self.send_to_server(&MixnetMessage::lookup_proof(sender, key, frontier_size))
+            .await
+    }
+
+    /// Request the node's signed descriptor.
+    pub async fn send_node_descriptor(&self, sender: &str, node_id: Option<&str>) -> Result<()> {
+        self.send_to_server(&MixnetMessage::node_descriptor(sender, node_id))
+            .await
+    }
+
+    /// Poll a mutation's finalization status.
+    pub async fn send_mutation_status(&self, sender: &str, mutation_hash: &str) -> Result<()> {
+        self.send_to_server(&MixnetMessage::mutation_status(sender, mutation_hash))
+            .await
     }
 
     // ========== Authentication Methods ==========
@@ -287,7 +343,10 @@ impl MixnetService {
     /// Sends with 200 SURBs to fill the server's SURB pool for this client.
     pub async fn send_ping(&self, username: &str, timestamp: i64, signature: &str) -> Result<()> {
         let env = MixnetMessage::ping(username, timestamp, signature);
-        let server_addr = self.server_address.read().await
+        let server_addr = self
+            .server_address
+            .read()
+            .await
             .clone()
             .context("Server address not configured")?;
         let recipient: Recipient = server_addr.parse()?;
@@ -332,7 +391,8 @@ impl MixnetService {
         conversation_id: &str,
         signature: &str,
     ) -> Result<()> {
-        let env = MixnetMessage::direct_message(sender, recipient, content, conversation_id, signature);
+        let env =
+            MixnetMessage::direct_message(sender, recipient, content, conversation_id, signature);
         let payload = env.to_json()?;
         let raw_bytes = payload.into_bytes();
 
@@ -358,7 +418,13 @@ impl MixnetService {
         mls_message: &[u8],
         signature: &str,
     ) -> Result<()> {
-        let env = MixnetMessage::mls_message_raw(sender, recipient, conversation_id, mls_message, signature);
+        let env = MixnetMessage::mls_message_raw(
+            sender,
+            recipient,
+            conversation_id,
+            mls_message,
+            signature,
+        );
         log::info!("Sending MLS message via server");
         self.send_to_server(&env).await?;
         log::info!("MLS message sent to server successfully");
@@ -366,7 +432,11 @@ impl MixnetService {
     }
 
     /// Send a sealed sender message (sender identity hidden from relay)
-    pub async fn send_sealed_message(&self, recipient: &str, sealed_payload_b64: &str) -> Result<()> {
+    pub async fn send_sealed_message(
+        &self,
+        recipient: &str,
+        sealed_payload_b64: &str,
+    ) -> Result<()> {
         let env = MixnetMessage::sealed_send(recipient, sealed_payload_b64);
         log::info!("Sending sealed message via server");
         self.send_to_server(&env).await?;
@@ -412,7 +482,7 @@ impl MixnetService {
         Ok(())
     }
 
-/// Send group join response for MLS handshake
+    /// Send group join response for MLS handshake
     pub async fn send_group_join_response(
         &self,
         sender: &str,
@@ -421,7 +491,8 @@ impl MixnetService {
         success: bool,
         signature: &str,
     ) -> Result<()> {
-        let env = MixnetMessage::group_join_response(sender, recipient, group_id, success, signature);
+        let env =
+            MixnetMessage::group_join_response(sender, recipient, group_id, success, signature);
         log::info!("Sending group join response to {} via server", recipient);
         self.send_to_server(&env).await?;
         log::info!("Group join response sent successfully");
@@ -538,9 +609,17 @@ impl MixnetService {
             welcome_timestamp,
             signature,
         );
-        log::info!("Sending MLS welcome for group {} to {} via group server", group_id, recipient);
+        log::info!(
+            "Sending MLS welcome for group {} to {} via group server",
+            group_id,
+            recipient
+        );
         self.send_message_to(group_server_address, &env).await?;
-        log::info!("MLS welcome for group {} sent to group server for {} successfully", group_id, recipient);
+        log::info!(
+            "MLS welcome for group {} sent to group server for {} successfully",
+            group_id,
+            recipient
+        );
         Ok(())
     }
 
@@ -554,7 +633,10 @@ impl MixnetService {
         group_server_address: &str,
     ) -> Result<()> {
         let env = MixnetMessage::group_join_request(sender, group_id, key_package, signature);
-        log::info!("Sending group join request for group {} to group server", group_id);
+        log::info!(
+            "Sending group join request for group {} to group server",
+            group_id
+        );
         self.send_message_to(group_server_address, &env).await?;
         log::info!("Group join request sent successfully");
         Ok(())
@@ -570,7 +652,11 @@ impl MixnetService {
         signature: &str,
     ) -> Result<()> {
         let env = MixnetMessage::welcome_ack(sender, recipient, group_id, success, signature);
-        log::info!("Sending welcome ack for group {} to {} via server", group_id, recipient);
+        log::info!(
+            "Sending welcome ack for group {} to {} via server",
+            group_id,
+            recipient
+        );
         self.send_to_server(&env).await?;
         log::info!("Welcome ack sent successfully");
         Ok(())
@@ -586,7 +672,11 @@ impl MixnetService {
         signature: &str,
     ) -> Result<()> {
         let env = MixnetMessage::group_invite(sender, recipient, group_id, group_name, signature);
-        log::info!("Sending group invite for {} to {} via server", group_id, recipient);
+        log::info!(
+            "Sending group invite for {} to {} via server",
+            group_id,
+            recipient
+        );
         self.send_to_server(&env).await?;
         log::info!("Group invite sent successfully");
         Ok(())
@@ -677,7 +767,8 @@ impl MixnetService {
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        let env = MixnetMessage::store_welcome(sender, group_id, target_username, welcome, signature);
+        let env =
+            MixnetMessage::store_welcome(sender, group_id, target_username, welcome, signature);
         log::info!(
             "Storing Welcome for {} in group {} on server {}",
             target_username,
@@ -780,7 +871,12 @@ impl MixnetService {
         pgp_fingerprint: &str,
         signature: &str,
     ) -> Result<()> {
-        let mut env = MixnetMessage::publish_key_package(sender, key_package_b64, pgp_signature, pgp_fingerprint);
+        let mut env = MixnetMessage::publish_key_package(
+            sender,
+            key_package_b64,
+            pgp_signature,
+            pgp_fingerprint,
+        );
         env.set_signature(signature);
         log::info!("Publishing key package for {} to server", sender);
         self.send_to_server(&env).await?;
@@ -789,10 +885,7 @@ impl MixnetService {
     }
 
     /// Request a PoW challenge for fetching a key package (anonymous)
-    pub async fn send_fetch_key_package_challenge(
-        &self,
-        target_username: &str,
-    ) -> Result<()> {
+    pub async fn send_fetch_key_package_challenge(&self, target_username: &str) -> Result<()> {
         let env = MixnetMessage::fetch_key_package_challenge(target_username);
         log::info!("Requesting key package challenge for {}", target_username);
         self.send_to_server(&env).await?;
@@ -808,7 +901,10 @@ impl MixnetService {
         nonce: &str,
     ) -> Result<()> {
         let env = MixnetMessage::fetch_key_package(target_username, challenge, nonce);
-        log::info!("Fetching key package for {} with PoW solution", target_username);
+        log::info!(
+            "Fetching key package for {} with PoW solution",
+            target_username
+        );
         self.send_to_server(&env).await?;
         log::info!("Key package fetch request sent");
         Ok(())
@@ -839,7 +935,11 @@ impl MixnetSender for MixnetService {
         MixnetService::send_raw(self, recipient_address, data).await
     }
 
-    async fn send_message_to(&self, recipient_address: &str, message: &MixnetMessage) -> Result<()> {
+    async fn send_message_to(
+        &self,
+        recipient_address: &str,
+        message: &MixnetMessage,
+    ) -> Result<()> {
         MixnetService::send_message_to(self, recipient_address, message).await
     }
 
@@ -881,7 +981,15 @@ impl MixnetSender for MixnetService {
         conversation_id: &str,
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_direct_message(self, sender, recipient, content, conversation_id, signature).await
+        MixnetService::send_direct_message(
+            self,
+            sender,
+            recipient,
+            content,
+            conversation_id,
+            signature,
+        )
+        .await
     }
 
     async fn send_mls_message(
@@ -892,14 +1000,18 @@ impl MixnetSender for MixnetService {
         mls_message: &[u8],
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_mls_message(self, sender, recipient, conversation_id, mls_message, signature).await
+        MixnetService::send_mls_message(
+            self,
+            sender,
+            recipient,
+            conversation_id,
+            mls_message,
+            signature,
+        )
+        .await
     }
 
-    async fn send_sealed_message(
-        &self,
-        recipient: &str,
-        sealed_payload_b64: &str,
-    ) -> Result<()> {
+    async fn send_sealed_message(&self, recipient: &str, sealed_payload_b64: &str) -> Result<()> {
         MixnetService::send_sealed_message(self, recipient, sealed_payload_b64).await
     }
 
@@ -927,10 +1039,11 @@ impl MixnetSender for MixnetService {
             sender_key_package,
             recipient_key_package,
             signature,
-        ).await
+        )
+        .await
     }
 
-async fn send_group_join_response(
+    async fn send_group_join_response(
         &self,
         sender: &str,
         recipient: &str,
@@ -938,7 +1051,10 @@ async fn send_group_join_response(
         success: bool,
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_group_join_response(self, sender, recipient, group_id, success, signature).await
+        MixnetService::send_group_join_response(
+            self, sender, recipient, group_id, success, signature,
+        )
+        .await
     }
 
     async fn send_group_message(
@@ -948,7 +1064,8 @@ async fn send_group_join_response(
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        MixnetService::send_group_message(self, sender, ciphertext, signature, group_server_address).await
+        MixnetService::send_group_message(self, sender, ciphertext, signature, group_server_address)
+            .await
     }
 
     async fn register_with_group_server(
@@ -966,7 +1083,8 @@ async fn send_group_join_response(
             signature,
             timestamp,
             group_server_address,
-        ).await
+        )
+        .await
     }
 
     async fn approve_group_member(
@@ -977,7 +1095,15 @@ async fn send_group_join_response(
         group_server_address: &str,
         timestamp: i64,
     ) -> Result<()> {
-        MixnetService::approve_group_member(self, admin, username_to_approve, signature, group_server_address, timestamp).await
+        MixnetService::approve_group_member(
+            self,
+            admin,
+            username_to_approve,
+            signature,
+            group_server_address,
+            timestamp,
+        )
+        .await
     }
 
     async fn send_group_fetch_request(
@@ -987,7 +1113,14 @@ async fn send_group_join_response(
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        MixnetService::send_group_fetch_request(self, sender, last_seen_id, signature, group_server_address).await
+        MixnetService::send_group_fetch_request(
+            self,
+            sender,
+            last_seen_id,
+            signature,
+            group_server_address,
+        )
+        .await
     }
 
     async fn send_mls_welcome(
@@ -1015,7 +1148,8 @@ async fn send_group_join_response(
             welcome_timestamp,
             signature,
             group_server_address,
-        ).await
+        )
+        .await
     }
 
     async fn send_group_join_request(
@@ -1026,7 +1160,15 @@ async fn send_group_join_response(
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        MixnetService::send_group_join_request(self, sender, group_id, key_package, signature, group_server_address).await
+        MixnetService::send_group_join_request(
+            self,
+            sender,
+            group_id,
+            key_package,
+            signature,
+            group_server_address,
+        )
+        .await
     }
 
     async fn send_welcome_ack(
@@ -1048,7 +1190,8 @@ async fn send_group_join_response(
         group_name: Option<&str>,
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_group_invite(self, sender, recipient, group_id, group_name, signature).await
+        MixnetService::send_group_invite(self, sender, recipient, group_id, group_name, signature)
+            .await
     }
 
     async fn send_key_package_for_group_request(
@@ -1058,7 +1201,10 @@ async fn send_group_join_response(
         group_id: &str,
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_key_package_for_group_request(self, sender, recipient, group_id, signature).await
+        MixnetService::send_key_package_for_group_request(
+            self, sender, recipient, group_id, signature,
+        )
+        .await
     }
 
     async fn send_key_package_for_group_response(
@@ -1076,7 +1222,8 @@ async fn send_group_join_response(
             group_id,
             key_package,
             signature,
-        ).await
+        )
+        .await
     }
 
     async fn register_with_group_server_and_key_package(
@@ -1096,7 +1243,8 @@ async fn send_group_join_response(
             timestamp,
             group_server_address,
             key_package,
-        ).await
+        )
+        .await
     }
 
     async fn store_welcome_on_server(
@@ -1116,7 +1264,8 @@ async fn send_group_join_response(
             welcome,
             signature,
             group_server_address,
-        ).await
+        )
+        .await
     }
 
     async fn buffer_commit_on_server(
@@ -1136,7 +1285,8 @@ async fn send_group_join_response(
             commit,
             signature,
             group_server_address,
-        ).await
+        )
+        .await
     }
 
     async fn fetch_welcome_from_server(
@@ -1146,7 +1296,14 @@ async fn send_group_join_response(
         signature: &str,
         group_server_address: &str,
     ) -> Result<()> {
-        MixnetService::fetch_welcome_from_server(self, username, group_id, signature, group_server_address).await
+        MixnetService::fetch_welcome_from_server(
+            self,
+            username,
+            group_id,
+            signature,
+            group_server_address,
+        )
+        .await
     }
 
     async fn sync_epoch_from_server(
@@ -1164,7 +1321,8 @@ async fn send_group_join_response(
             since_id,
             signature,
             group_server_address,
-        ).await
+        )
+        .await
     }
 
     async fn query_pending_users(
@@ -1184,13 +1342,18 @@ async fn send_group_join_response(
         pgp_fingerprint: &str,
         signature: &str,
     ) -> Result<()> {
-        MixnetService::send_publish_key_package(self, sender, key_package_b64, pgp_signature, pgp_fingerprint, signature).await
+        MixnetService::send_publish_key_package(
+            self,
+            sender,
+            key_package_b64,
+            pgp_signature,
+            pgp_fingerprint,
+            signature,
+        )
+        .await
     }
 
-    async fn send_fetch_key_package_challenge(
-        &self,
-        target_username: &str,
-    ) -> Result<()> {
+    async fn send_fetch_key_package_challenge(&self, target_username: &str) -> Result<()> {
         MixnetService::send_fetch_key_package_challenge(self, target_username).await
     }
 

@@ -63,7 +63,10 @@ pub async fn resolve_server_address(
         }
     }
 
-    tracing::info!("Resolving discovery-server address via mixnet for {}", domain);
+    tracing::info!(
+        "Resolving discovery-server address via mixnet for {}",
+        domain
+    );
     let recipient = nymstr_discovery::Discovery::default()
         .resolve(&domain)
         .await

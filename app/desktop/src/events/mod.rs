@@ -40,7 +40,6 @@ pub enum AppEvent {
     ContactOnline { username: String, online: bool },
 
     // ========== Authentication Events ==========
-
     /// Server sent a challenge for authentication
     AuthChallenge {
         /// The username being authenticated
@@ -78,7 +77,6 @@ pub enum AppEvent {
     },
 
     // ========== Group Events ==========
-
     /// Group messages received from server
     GroupMessagesReceived {
         /// Number of messages received
@@ -98,7 +96,6 @@ pub enum AppEvent {
     },
 
     // ========== Welcome/Invite Events ==========
-
     /// Welcome message received for joining a group
     WelcomeReceived {
         /// The group ID
@@ -142,7 +139,6 @@ pub enum AppEvent {
     },
 
     // ========== System Events ==========
-
     /// System notification message
     SystemNotification {
         /// The notification message
@@ -275,7 +271,12 @@ impl EventEmitter {
     }
 
     /// Emit a group invite received event
-    pub fn group_invite_received(&self, group_id: String, group_name: Option<String>, sender: String) {
+    pub fn group_invite_received(
+        &self,
+        group_id: String,
+        group_name: Option<String>,
+        sender: String,
+    ) {
         self.emit(AppEvent::GroupInviteReceived {
             group_id,
             group_name,

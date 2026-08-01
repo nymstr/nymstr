@@ -60,23 +60,16 @@ impl BackgroundTasks {
         tracing::info!("Starting background tasks");
 
         // Start message receive loop
-        let message_loop = message_loop::start_message_receive_loop(
-            app_handle.clone(),
-            Arc::clone(&state),
-            rx,
-        );
+        let message_loop =
+            message_loop::start_message_receive_loop(app_handle.clone(), Arc::clone(&state), rx);
 
         // Start buffer processor
-        let buffer_processor = buffer_processor::start_buffer_processor(
-            app_handle.clone(),
-            Arc::clone(&state),
-        );
+        let buffer_processor =
+            buffer_processor::start_buffer_processor(app_handle.clone(), Arc::clone(&state));
 
         // Start connection monitor
-        let connection_monitor = connection_monitor::start_connection_monitor(
-            app_handle,
-            Arc::clone(&state),
-        );
+        let connection_monitor =
+            connection_monitor::start_connection_monitor(app_handle, Arc::clone(&state));
 
         tracing::info!("All background tasks started");
 
@@ -92,23 +85,16 @@ impl BackgroundTasks {
     /// This starts only:
     /// - Buffer processor (retries epoch-buffered MLS messages)
     /// - Connection monitor (checks connection health)
-    pub fn start_without_message_loop(
-        app_handle: AppHandle,
-        state: Arc<AppState>,
-    ) -> Self {
+    pub fn start_without_message_loop(app_handle: AppHandle, state: Arc<AppState>) -> Self {
         tracing::info!("Starting background tasks (without message loop)");
 
         // Start buffer processor
-        let buffer_processor = buffer_processor::start_buffer_processor(
-            app_handle.clone(),
-            Arc::clone(&state),
-        );
+        let buffer_processor =
+            buffer_processor::start_buffer_processor(app_handle.clone(), Arc::clone(&state));
 
         // Start connection monitor
-        let connection_monitor = connection_monitor::start_connection_monitor(
-            app_handle,
-            Arc::clone(&state),
-        );
+        let connection_monitor =
+            connection_monitor::start_connection_monitor(app_handle, Arc::clone(&state));
 
         tracing::info!("Background tasks started (message loop pending)");
 
@@ -135,9 +121,7 @@ impl BackgroundTasks {
 
         // Start new message loop
         self.message_loop = Some(message_loop::start_message_receive_loop(
-            app_handle,
-            state,
-            rx,
+            app_handle, state, rx,
         ));
 
         tracing::info!("Message receive loop started");
@@ -175,14 +159,28 @@ impl BackgroundTasks {
 
     /// Check if the message loop is running
     pub fn is_message_loop_running(&self) -> bool {
-        self.message_loop.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
+        self.message_loop
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
     }
 
     /// Check if any tasks are running
     pub fn is_running(&self) -> bool {
-        self.message_loop.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
-            || self.buffer_processor.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
-            || self.connection_monitor.as_ref().map(|h| !h.is_finished()).unwrap_or(false)
+        self.message_loop
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+            || self
+                .buffer_processor
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false)
+            || self
+                .connection_monitor
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false)
     }
 }
 

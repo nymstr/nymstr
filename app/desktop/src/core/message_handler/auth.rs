@@ -44,8 +44,11 @@ impl AuthenticationHandler {
         tracing::info!("Processing registration challenge for user: {}", username);
 
         // Sign the raw nonce with our PGP key (PGP handles hashing internally)
-        let signature =
-            PgpSigner::sign_detached_secure(&self.pgp_secret_key, nonce.as_bytes(), &self.pgp_passphrase)?;
+        let signature = PgpSigner::sign_detached_secure(
+            &self.pgp_secret_key,
+            nonce.as_bytes(),
+            &self.pgp_passphrase,
+        )?;
 
         // Send signed response back to server
         self.service
@@ -69,11 +72,7 @@ impl AuthenticationHandler {
                 Ok(true)
             }
             error_msg => {
-                tracing::error!(
-                    "Registration failed for user {}: {}",
-                    username,
-                    error_msg
-                );
+                tracing::error!("Registration failed for user {}: {}", username, error_msg);
                 Ok(false)
             }
         }

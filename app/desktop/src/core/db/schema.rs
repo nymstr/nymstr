@@ -354,15 +354,33 @@ async fn create_tables(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Transparency-log pins (SERVER_SPEC.md §8.3): the identity key the client
+    // has verified for a qualified name, its seqNo, and OOB-verify flag.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS federation_pins (
+            qualified_name TEXT PRIMARY KEY,
+            identity_pk    TEXT NOT NULL,
+            seq_no         INTEGER NOT NULL,
+            verified_oob   INTEGER NOT NULL DEFAULT 0,
+            updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     Ok(())
 }
 
 /// Create all indexes for efficient lookups
 async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Message indexes
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)",
+    )
+    .execute(db)
+    .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
         .execute(db)
@@ -379,14 +397,18 @@ async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     // Key packages index
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_key_packages_unused ON key_packages(used, created_at)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_key_packages_unused ON key_packages(used, created_at)",
+    )
+    .execute(db)
+    .await?;
 
     // Group members index
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_members_conv ON group_members(conversation_id)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_group_members_conv ON group_members(conversation_id)",
+    )
+    .execute(db)
+    .await?;
 
     // Group invites index
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_invites_status ON group_invites(status)")
@@ -394,14 +416,18 @@ async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     // Join requests index
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_join_requests_group ON join_requests(group_id, status)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_join_requests_group ON join_requests(group_id, status)",
+    )
+    .execute(db)
+    .await?;
 
     // Group memberships index
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_memberships_user ON group_memberships(username)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_group_memberships_user ON group_memberships(username)",
+    )
+    .execute(db)
+    .await?;
 
     // Group cursors index
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_cursors_user ON group_cursors(username)")
@@ -409,9 +435,11 @@ async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await?;
 
     // Contact requests index
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_contact_requests_status ON contact_requests(status)")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_contact_requests_status ON contact_requests(status)",
+    )
+    .execute(db)
+    .await?;
 
     // Query cache: store public keys from discovery server lookups
     sqlx::query(
@@ -419,7 +447,7 @@ async fn create_indexes(db: &SqlitePool) -> Result<(), sqlx::Error> {
             username TEXT PRIMARY KEY,
             public_key TEXT NOT NULL,
             cached_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )"
+        )",
     )
     .execute(db)
     .await?;
@@ -442,10 +470,11 @@ mod tests {
             .await
             .unwrap();
 
-        let _: Vec<(String,)> = sqlx::query_as("SELECT server_address FROM group_memberships LIMIT 1")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        let _: Vec<(String,)> =
+            sqlx::query_as("SELECT server_address FROM group_memberships LIMIT 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
     }
 
     #[tokio::test]

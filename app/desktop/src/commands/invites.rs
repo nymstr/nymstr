@@ -59,7 +59,11 @@ pub async fn accept_contact_request(
 
     let (welcome_payload_json, stored_signature, stored_timestamp) = match row {
         Some((payload, sig, ts)) => (payload, sig, ts),
-        None => return Err(ApiError::not_found("Contact request not found or already handled")),
+        None => {
+            return Err(ApiError::not_found(
+                "Contact request not found or already handled",
+            ))
+        }
     };
 
     let welcome_payload: serde_json::Value = serde_json::from_str(&welcome_payload_json)
@@ -97,13 +101,12 @@ pub async fn accept_contact_request(
 
     // Fetch the sender's public key from the server (authoritative source).
     // Check query_cache first to avoid a round-trip if we already have it.
-    let cached_pk: Option<String> = sqlx::query_scalar(
-        "SELECT public_key FROM query_cache WHERE username = ?"
-    )
-    .bind(&from_username)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| ApiError::internal(e.to_string()))?;
+    let cached_pk: Option<String> =
+        sqlx::query_scalar("SELECT public_key FROM query_cache WHERE username = ?")
+            .bind(&from_username)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let sender_public_key = if let Some(pk) = cached_pk.filter(|pk| !pk.is_empty()) {
         pk
@@ -120,7 +123,7 @@ pub async fn accept_contact_request(
             Ok(Ok(Some(query_result))) => {
                 // Cache for future use
                 let _ = sqlx::query(
-                    "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)"
+                    "INSERT OR REPLACE INTO query_cache (username, public_key) VALUES (?, ?)",
                 )
                 .bind(&from_username)
                 .bind(&query_result.public_key)
@@ -157,7 +160,10 @@ pub async fn accept_contact_request(
         &signature,
     )
     .map_err(|e| ApiError::validation(format!("Sender signature invalid: {}", e)))?;
-    tracing::info!("Deferred signature verification passed for {}", from_username);
+    tracing::info!(
+        "Deferred signature verification passed for {}",
+        from_username
+    );
 
     let handler = DirectMessageHandlerBuilder::new()
         .mls_client(mls_client)
@@ -207,7 +213,11 @@ pub async fn accept_contact_request(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    tracing::info!("Contact request from {} accepted, conversation: {}", from_username, conversation_id);
+    tracing::info!(
+        "Contact request from {} accepted, conversation: {}",
+        from_username,
+        conversation_id
+    );
 
     Ok(serde_json::json!({
         "conversationId": conversation_id,
@@ -243,10 +253,7 @@ pub async fn deny_contact_request(
 
 /// Deny a group welcome/invite (mark as processed with denial)
 #[tauri::command]
-pub async fn deny_welcome(
-    welcome_id: i64,
-    state: State<'_, AppState>,
-) -> Result<(), ApiError> {
+pub async fn deny_welcome(welcome_id: i64, state: State<'_, AppState>) -> Result<(), ApiError> {
     crate::core::db::MlsDb::mark_welcome_failed(&state.db, welcome_id, "denied_by_user")
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;

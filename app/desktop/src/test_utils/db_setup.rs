@@ -225,11 +225,15 @@ mod tests {
         assert!(temp_dir_path.join("test.db").exists());
 
         // Can use the pool
-        seed_test_users(&pool, &[("test", "pk_test")]).await.unwrap();
+        seed_test_users(&pool, &[("test", "pk_test")])
+            .await
+            .unwrap();
 
         // Verify the user was inserted
-        let users: Vec<(String,)> =
-            sqlx::query_as("SELECT username FROM users").fetch_all(&pool).await.unwrap();
+        let users: Vec<(String,)> = sqlx::query_as("SELECT username FROM users")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         assert_eq!(users.len(), 1);
 
         // temp_dir will be cleaned up when this function returns

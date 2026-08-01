@@ -84,7 +84,14 @@ impl MlsTestFactory {
     /// Create clients for a typical 3-user test scenario (Alice, Bob, Charlie)
     pub fn create_abc_scenario(
         &mut self,
-    ) -> Result<(TestUser, TestUser, TestUser, TestMlsClient, TestMlsClient, TestMlsClient)> {
+    ) -> Result<(
+        TestUser,
+        TestUser,
+        TestUser,
+        TestMlsClient,
+        TestMlsClient,
+        TestMlsClient,
+    )> {
         use crate::test_utils::pgp_test_keys::generate_abc_users;
 
         let (alice, bob, charlie) = generate_abc_users()?;
@@ -93,7 +100,14 @@ impl MlsTestFactory {
         let bob_client = self.create_client(&bob)?;
         let charlie_client = self.create_client(&charlie)?;
 
-        Ok((alice, bob, charlie, alice_client, bob_client, charlie_client))
+        Ok((
+            alice,
+            bob,
+            charlie,
+            alice_client,
+            bob_client,
+            charlie_client,
+        ))
     }
 
     /// Create clients for a direct messaging test scenario
@@ -375,19 +389,26 @@ mod tests {
         assert_eq!(packages.len(), 20);
 
         for (username, kp) in &packages {
-            assert!(!kp.is_empty(), "Key package for {} should not be empty", username);
+            assert!(
+                !kp.is_empty(),
+                "Key package for {} should not be empty",
+                username
+            );
         }
     }
 
     #[test]
     fn test_create_named_group() {
         let mut factory = MlsTestFactory::new();
-        let group = factory.create_named_group(&[
-            "admin", "alice", "bob", "carol", "dave", "eve"
-        ]).unwrap();
+        let group = factory
+            .create_named_group(&["admin", "alice", "bob", "carol", "dave", "eve"])
+            .unwrap();
 
         assert_eq!(group.size(), 6);
-        assert_eq!(group.usernames(), vec!["admin", "alice", "bob", "carol", "dave", "eve"]);
+        assert_eq!(
+            group.usernames(),
+            vec!["admin", "alice", "bob", "carol", "dave", "eve"]
+        );
 
         let (admin_user, _) = group.admin();
         assert_eq!(admin_user.username(), "admin");
@@ -415,7 +436,8 @@ mod tests {
         // Generate all key packages and verify they're unique
         let packages = group.generate_all_key_packages().unwrap();
 
-        let mut seen_packages: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        let mut seen_packages: std::collections::HashSet<Vec<u8>> =
+            std::collections::HashSet::new();
         for (username, kp) in packages {
             assert!(
                 seen_packages.insert(kp.clone()),

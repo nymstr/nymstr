@@ -21,7 +21,8 @@ pub trait MixnetSender: Send + Sync {
     async fn send_raw(&self, recipient_address: &str, data: Vec<u8>) -> Result<()>;
 
     /// Send a MixnetMessage to a recipient address
-    async fn send_message_to(&self, recipient_address: &str, message: &MixnetMessage) -> Result<()>;
+    async fn send_message_to(&self, recipient_address: &str, message: &MixnetMessage)
+        -> Result<()>;
 
     /// Send a MixnetMessage to the configured server
     async fn send_to_server(&self, message: &MixnetMessage) -> Result<()>;
@@ -74,11 +75,7 @@ pub trait MixnetSender: Send + Sync {
     ) -> Result<()>;
 
     /// Send a sealed sender message (sender identity hidden from relay)
-    async fn send_sealed_message(
-        &self,
-        recipient: &str,
-        sealed_payload_b64: &str,
-    ) -> Result<()>;
+    async fn send_sealed_message(&self, recipient: &str, sealed_payload_b64: &str) -> Result<()>;
 
     // ========== MLS Key Exchange Methods ==========
 
@@ -100,7 +97,7 @@ pub trait MixnetSender: Send + Sync {
         signature: &str,
     ) -> Result<()>;
 
-/// Send group join response for MLS handshake
+    /// Send group join response for MLS handshake
     async fn send_group_join_response(
         &self,
         sender: &str,
@@ -291,10 +288,7 @@ pub trait MixnetSender: Send + Sync {
     ) -> Result<()>;
 
     /// Request a PoW challenge for fetching a key package (anonymous)
-    async fn send_fetch_key_package_challenge(
-        &self,
-        target_username: &str,
-    ) -> Result<()>;
+    async fn send_fetch_key_package_challenge(&self, target_username: &str) -> Result<()>;
 
     /// Fetch a key package after completing PoW (anonymous)
     async fn send_fetch_key_package(

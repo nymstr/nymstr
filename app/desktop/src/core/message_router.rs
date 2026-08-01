@@ -24,9 +24,24 @@ pub enum MessageRoute {
     Group,
     /// MLS Welcome flow messages (mlsWelcome, groupInvite, groupJoinRequest, etc.)
     WelcomeFlow,
+    /// Namespace transparency-log responses (SERVER_SPEC.md §8)
+    Federation,
     /// Unknown or unsupported message types
     Unknown,
 }
+
+/// Response actions for the namespace transparency-log protocol, resolved by
+/// awaiting commands via `pending_fed`.
+pub const FEDERATION_ACTIONS: &[&str] = &[
+    "mutationChallenge",
+    "submitMutationResponse",
+    "mutationStatusResponse",
+    "lookupProofResponse",
+    "nodeDescriptorResponse",
+    "sthRangeResponse",
+    "entryHistoryResponse",
+    "conflictCertsResponse",
+];
 
 /// Pure message router - no side effects, just determines routing
 pub struct MessageRouter;
@@ -41,15 +56,19 @@ impl MessageRouter {
             }
 
             // MLS protocol messages (key package exchange, DM handshake is sealed)
-            "keyPackageRequest" | "keyPackageResponse"
-            | "fetchKeyPackageChallengeResponse" | "fetchKeyPackageResponse"
-            | "keyPackageNeeded" => {
-                MessageRoute::MlsProtocol
-            }
+            "keyPackageRequest"
+            | "keyPackageResponse"
+            | "fetchKeyPackageChallengeResponse"
+            | "fetchKeyPackageResponse"
+            | "keyPackageNeeded" => MessageRoute::MlsProtocol,
 
             // MLS Welcome flow messages (group invitation and joining)
-            "mlsWelcome" | "groupInvite" | "groupJoinRequest" | "welcomeAck"
-            | "keyPackageForGroup" | "keyPackageForGroupResponse" => MessageRoute::WelcomeFlow,
+            "mlsWelcome"
+            | "groupInvite"
+            | "groupJoinRequest"
+            | "welcomeAck"
+            | "keyPackageForGroup"
+            | "keyPackageForGroupResponse" => MessageRoute::WelcomeFlow,
 
             // MLS chat messages (all messages use MLS now)
             "send" | "incomingMessage" => MessageRoute::MlsProtocol,
@@ -61,8 +80,14 @@ impl MessageRouter {
             "queryResponse" => MessageRoute::Query,
 
             // Group server responses
-            "fetchGroupResponse" | "sendGroupResponse" | "registerResponse"
-            | "approveGroupResponse" | "syncEpochResponse" => MessageRoute::Group,
+            "fetchGroupResponse"
+            | "sendGroupResponse"
+            | "registerResponse"
+            | "approveGroupResponse"
+            | "syncEpochResponse" => MessageRoute::Group,
+
+            // Namespace transparency-log responses
+            a if FEDERATION_ACTIONS.contains(&a) => MessageRoute::Federation,
 
             // Unknown message type
             _ => MessageRoute::Unknown,
@@ -79,6 +104,7 @@ impl MessageRouter {
             MessageRoute::Handshake => true,       // Handle immediately
             MessageRoute::Group => true,           // Handle group responses immediately
             MessageRoute::WelcomeFlow => true,     // Handle Welcome flow immediately
+            MessageRoute::Federation => true,      // Resolve pending fed request
             MessageRoute::Unknown => false,        // Ignore
         }
     }
@@ -93,6 +119,7 @@ impl MessageRouter {
             MessageRoute::Query => "Query response",
             MessageRoute::Group => "Group server message",
             MessageRoute::WelcomeFlow => "MLS Welcome flow message",
+            MessageRoute::Federation => "Transparency-log response",
             MessageRoute::Unknown => "Unknown message type",
         }
     }
@@ -106,15 +133,19 @@ impl MessageRouter {
             }
 
             // MLS protocol messages (key package exchange, DM handshake is sealed)
-            "keyPackageRequest" | "keyPackageResponse"
-            | "fetchKeyPackageChallengeResponse" | "fetchKeyPackageResponse"
-            | "keyPackageNeeded" => {
-                MessageRoute::MlsProtocol
-            }
+            "keyPackageRequest"
+            | "keyPackageResponse"
+            | "fetchKeyPackageChallengeResponse"
+            | "fetchKeyPackageResponse"
+            | "keyPackageNeeded" => MessageRoute::MlsProtocol,
 
             // MLS Welcome flow messages (group invitation and joining)
-            "mlsWelcome" | "groupInvite" | "groupJoinRequest" | "welcomeAck"
-            | "keyPackageForGroup" | "keyPackageForGroupResponse" => MessageRoute::WelcomeFlow,
+            "mlsWelcome"
+            | "groupInvite"
+            | "groupJoinRequest"
+            | "welcomeAck"
+            | "keyPackageForGroup"
+            | "keyPackageForGroupResponse" => MessageRoute::WelcomeFlow,
 
             // MLS chat messages (all messages use MLS now)
             "send" | "incomingMessage" => MessageRoute::MlsProtocol,
@@ -126,8 +157,14 @@ impl MessageRouter {
             "queryResponse" => MessageRoute::Query,
 
             // Group server responses
-            "fetchGroupResponse" | "sendGroupResponse" | "registerResponse"
-            | "approveGroupResponse" | "syncEpochResponse" => MessageRoute::Group,
+            "fetchGroupResponse"
+            | "sendGroupResponse"
+            | "registerResponse"
+            | "approveGroupResponse"
+            | "syncEpochResponse" => MessageRoute::Group,
+
+            // Namespace transparency-log responses
+            a if FEDERATION_ACTIONS.contains(&a) => MessageRoute::Federation,
 
             // Unknown message type
             _ => MessageRoute::Unknown,
@@ -162,7 +199,12 @@ mod tests {
 
     #[test]
     fn test_authentication_routing() {
-        let messages = ["challenge", "challengeResponse", "loginResponse", "sendResponse"];
+        let messages = [
+            "challenge",
+            "challengeResponse",
+            "loginResponse",
+            "sendResponse",
+        ];
 
         for action in messages {
             let incoming = create_test_incoming(action);
@@ -279,18 +321,24 @@ mod tests {
         assert!(!MessageRouter::should_process_immediately(
             &MessageRoute::Authentication
         ));
-        assert!(!MessageRouter::should_process_immediately(&MessageRoute::Query));
+        assert!(!MessageRouter::should_process_immediately(
+            &MessageRoute::Query
+        ));
         assert!(MessageRouter::should_process_immediately(
             &MessageRoute::MlsProtocol
         ));
-        assert!(MessageRouter::should_process_immediately(&MessageRoute::Chat));
+        assert!(MessageRouter::should_process_immediately(
+            &MessageRoute::Chat
+        ));
         assert!(MessageRouter::should_process_immediately(
             &MessageRoute::Handshake
         ));
         assert!(MessageRouter::should_process_immediately(
             &MessageRoute::WelcomeFlow
         ));
-        assert!(MessageRouter::should_process_immediately(&MessageRoute::Group));
+        assert!(MessageRouter::should_process_immediately(
+            &MessageRoute::Group
+        ));
         assert!(!MessageRouter::should_process_immediately(
             &MessageRoute::Unknown
         ));

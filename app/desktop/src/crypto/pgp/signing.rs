@@ -38,24 +38,24 @@ impl PgpSigner {
             data.len()
         );
 
-        let mut config = SignatureConfig::from_key(
-            thread_rng(),
-            &secret_key.primary_key,
-            SignatureType::Binary,
-        )
-        .map_err(|e| anyhow!("Failed to create signature config: {}", e))?;
+        let mut config =
+            SignatureConfig::from_key(thread_rng(), &secret_key.primary_key, SignatureType::Binary)
+                .map_err(|e| anyhow!("Failed to create signature config: {}", e))?;
 
         config.hashed_subpackets = vec![
             Subpacket::regular(SubpacketData::IssuerFingerprint(secret_key.fingerprint()))
                 .map_err(|e| anyhow!("Failed to create fingerprint subpacket: {}", e))?,
-            Subpacket::critical(SubpacketData::SignatureCreationTime(SystemTime::now().into()))
-                .map_err(|e| anyhow!("Failed to create creation time subpacket: {}", e))?,
+            Subpacket::critical(SubpacketData::SignatureCreationTime(
+                SystemTime::now().into(),
+            ))
+            .map_err(|e| anyhow!("Failed to create creation time subpacket: {}", e))?,
         ];
 
-        config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::Issuer(
-            secret_key.key_id(),
-        ))
-        .map_err(|e| anyhow!("Failed to create issuer subpacket: {}", e))?];
+        config.unhashed_subpackets =
+            vec![
+                Subpacket::regular(SubpacketData::Issuer(secret_key.key_id()))
+                    .map_err(|e| anyhow!("Failed to create issuer subpacket: {}", e))?,
+            ];
 
         let signature = config
             .sign(&secret_key.primary_key, &passphrase.to_pgp_password(), data)
@@ -89,14 +89,17 @@ impl PgpSigner {
         config.hashed_subpackets = vec![
             Subpacket::regular(SubpacketData::IssuerFingerprint(secret_key.fingerprint()))
                 .map_err(|e| anyhow!("Failed to create fingerprint subpacket: {}", e))?,
-            Subpacket::critical(SubpacketData::SignatureCreationTime(SystemTime::now().into()))
-                .map_err(|e| anyhow!("Failed to create creation time subpacket: {}", e))?,
+            Subpacket::critical(SubpacketData::SignatureCreationTime(
+                SystemTime::now().into(),
+            ))
+            .map_err(|e| anyhow!("Failed to create creation time subpacket: {}", e))?,
         ];
 
-        config.unhashed_subpackets = vec![Subpacket::regular(SubpacketData::Issuer(
-            secret_key.key_id(),
-        ))
-        .map_err(|e| anyhow!("Failed to create issuer subpacket: {}", e))?];
+        config.unhashed_subpackets =
+            vec![
+                Subpacket::regular(SubpacketData::Issuer(secret_key.key_id()))
+                    .map_err(|e| anyhow!("Failed to create issuer subpacket: {}", e))?,
+            ];
 
         let signature = config
             .sign(
@@ -152,12 +155,13 @@ impl PgpSigner {
 
         // Get signature creation time from subpackets
         let created_at = signature.config().and_then(|config| {
-            config.hashed_subpackets.iter().find_map(|subpkt| {
-                match &subpkt.data {
+            config
+                .hashed_subpackets
+                .iter()
+                .find_map(|subpkt| match &subpkt.data {
                     pgp::packet::SubpacketData::SignatureCreationTime(dt) => Some(dt.clone()),
                     _ => None,
-                }
-            })
+                })
         });
 
         let result = VerifiedSignature {

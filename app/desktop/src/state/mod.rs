@@ -114,6 +114,11 @@ pub struct AppState {
     /// Pending user queries awaiting responses
     pub pending_queries: Arc<RwLock<HashMap<String, oneshot::Sender<Option<QueryResult>>>>>,
 
+    /// Pending transparency-log requests, keyed by the response action they
+    /// await (e.g. `lookupProofResponse`). One in-flight request per action
+    /// suffices for the sequential publish/verify flows (SERVER_SPEC §8).
+    pub pending_fed: Arc<RwLock<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
+
     /// Cached discovery server public key for signature verification (TOFU)
     pub server_public_key: Arc<RwLock<Option<SignedPublicKey>>>,
 
@@ -126,7 +131,9 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new AppState instance
-    pub async fn new(app_handle: &AppHandle) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new(
+        app_handle: &AppHandle,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Get app data directory
         let app_dir = app_handle
             .path()
@@ -169,6 +176,7 @@ impl AppState {
             key_package_manager: Arc::new(KeyPackageManager::new()),
             background_tasks: Arc::new(RwLock::new(None)),
             pending_queries: Arc::new(RwLock::new(HashMap::new())),
+            pending_fed: Arc::new(RwLock::new(HashMap::new())),
             server_public_key: Arc::new(RwLock::new(None)),
             server_times: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -176,11 +184,9 @@ impl AppState {
 
     /// Check if a user exists locally
     pub async fn has_local_user(&self) -> Result<Option<String>, sqlx::Error> {
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT username FROM users LIMIT 1"
-        )
-        .fetch_optional(&self.db)
-        .await?;
+        let result: Option<(String,)> = sqlx::query_as("SELECT username FROM users LIMIT 1")
+            .fetch_optional(&self.db)
+            .await?;
 
         Ok(result.map(|(username,)| username))
     }
@@ -216,10 +222,7 @@ impl AppState {
     }
 
     /// Persist a server address that came from auto-resolution.
-    pub async fn set_resolved_server_address(
-        &self,
-        address: String,
-    ) -> Result<(), std::io::Error> {
+    pub async fn set_resolved_server_address(&self, address: String) -> Result<(), std::io::Error> {
         self.write_server_address(Some(address), ServerAddressSource::Resolved)
             .await
     }
@@ -258,12 +261,11 @@ impl AppState {
     /// a key mismatch is rejected to detect potential MITM attacks.
     pub async fn store_server_public_key(&self, public_key_armored: &str) {
         // Check for key mismatch (TOFU enforcement)
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT public_key FROM server_keys WHERE server_id = 'discovery'"
-        )
-        .fetch_optional(&self.db)
-        .await
-        .unwrap_or(None);
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT public_key FROM server_keys WHERE server_id = 'discovery'")
+                .fetch_optional(&self.db)
+                .await
+                .unwrap_or(None);
 
         if let Some((existing_key,)) = existing {
             if existing_key != public_key_armored {
@@ -299,12 +301,11 @@ impl AppState {
         if self.server_public_key.read().await.is_some() {
             return;
         }
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT public_key FROM server_keys WHERE server_id = 'discovery'"
-        )
-        .fetch_optional(&self.db)
-        .await
-        .unwrap_or(None);
+        let result: Option<(String,)> =
+            sqlx::query_as("SELECT public_key FROM server_keys WHERE server_id = 'discovery'")
+                .fetch_optional(&self.db)
+                .await
+                .unwrap_or(None);
 
         if let Some((pk_armored,)) = result {
             match SignedPublicKey::from_string(&pk_armored) {
@@ -339,7 +340,10 @@ impl AppState {
     }
 
     /// Verify a server message signature. Returns true if valid or if no key is known yet (TOFU grace).
-    pub async fn verify_server_signature(&self, envelope: &crate::core::messages::MixnetMessage) -> bool {
+    pub async fn verify_server_signature(
+        &self,
+        envelope: &crate::core::messages::MixnetMessage,
+    ) -> bool {
         let guard = self.server_public_key.read().await;
         let server_key = match guard.as_ref() {
             Some(key) => key,
@@ -359,7 +363,11 @@ impl AppState {
             }
         };
 
-        match PgpSigner::verify_detached_any_format(server_key, payload_str.as_bytes(), &envelope.signature) {
+        match PgpSigner::verify_detached_any_format(
+            server_key,
+            payload_str.as_bytes(),
+            &envelope.signature,
+        ) {
             Ok(result) => {
                 if !result.is_valid {
                     tracing::warn!(
@@ -419,9 +427,7 @@ impl AppState {
     }
 
     /// Get PGP keys if available (returns cloned Arc references)
-    pub async fn get_pgp_keys(
-        &self,
-    ) -> Option<(ArcSecretKey, ArcPublicKey, ArcPassphrase)> {
+    pub async fn get_pgp_keys(&self) -> Option<(ArcSecretKey, ArcPublicKey, ArcPassphrase)> {
         let secret = self.pgp_secret_key.read().await.clone()?;
         let public = self.pgp_public_key.read().await.clone()?;
         let passphrase = self.pgp_passphrase.read().await.clone()?;
@@ -496,7 +502,10 @@ impl AppState {
 
     /// Initialize MLS client for the current user
     /// This should be called after PGP keys are loaded
-    pub async fn initialize_mls_client(&self, username: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn initialize_mls_client(
+        &self,
+        username: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use crate::crypto::mls::MlsClient;
 
         // Check if already initialized
@@ -518,7 +527,8 @@ impl AppState {
             public_key,
             &passphrase,
             self.app_dir.clone(),
-        ).map_err(|e| format!("Failed to create MLS client: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to create MLS client: {}", e))?;
 
         // Store the client in state
         self.set_mls_client(Arc::new(mls_client)).await;
@@ -578,20 +588,36 @@ impl AppState {
 
     /// Check if background tasks are running
     pub async fn are_background_tasks_running(&self) -> bool {
-        self.background_tasks.read().await.as_ref().map(|t| t.is_running()).unwrap_or(false)
+        self.background_tasks
+            .read()
+            .await
+            .as_ref()
+            .map(|t| t.is_running())
+            .unwrap_or(false)
     }
 
     /// Check if message loop is running
     pub async fn is_message_loop_running(&self) -> bool {
-        self.background_tasks.read().await.as_ref().map(|t| t.is_message_loop_running()).unwrap_or(false)
+        self.background_tasks
+            .read()
+            .await
+            .as_ref()
+            .map(|t| t.is_message_loop_running())
+            .unwrap_or(false)
     }
 
     // ========== Query Management ==========
 
     /// Register a pending query and return a receiver for the result
-    pub async fn register_pending_query(&self, username: &str) -> oneshot::Receiver<Option<QueryResult>> {
+    pub async fn register_pending_query(
+        &self,
+        username: &str,
+    ) -> oneshot::Receiver<Option<QueryResult>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_queries.write().await.insert(username.to_string(), tx);
+        self.pending_queries
+            .write()
+            .await
+            .insert(username.to_string(), tx);
         rx
     }
 
@@ -605,5 +631,32 @@ impl AppState {
     /// Cancel a pending query
     pub async fn cancel_pending_query(&self, username: &str) {
         self.pending_queries.write().await.remove(username);
+    }
+
+    // ========== Transparency-log request management ==========
+
+    /// Register a pending federation request keyed by its response action.
+    pub async fn register_pending_fed(
+        &self,
+        response_action: &str,
+    ) -> oneshot::Receiver<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_fed
+            .write()
+            .await
+            .insert(response_action.to_string(), tx);
+        rx
+    }
+
+    /// Resolve a pending federation request with the response payload.
+    pub async fn resolve_pending_fed(&self, response_action: &str, payload: serde_json::Value) {
+        if let Some(tx) = self.pending_fed.write().await.remove(response_action) {
+            let _ = tx.send(payload);
+        }
+    }
+
+    /// Cancel a pending federation request.
+    pub async fn cancel_pending_fed(&self, response_action: &str) {
+        self.pending_fed.write().await.remove(response_action);
     }
 }

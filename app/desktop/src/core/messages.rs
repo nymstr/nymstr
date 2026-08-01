@@ -28,7 +28,11 @@ pub struct MixnetMessage {
     /// ISO-8601 timestamp when message was created
     pub timestamp: String,
     /// Server unix timestamp for clock-skew resilience (optional, present in server responses)
-    #[serde(rename = "serverTime", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "serverTime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub server_time: Option<i64>,
 }
 
@@ -45,6 +49,66 @@ impl MixnetMessage {
             message_type: "system".into(),
             action: "query".into(),
             sender: "anonymous".into(),
+            recipient: "server".into(),
+            payload,
+            signature: "placeholder".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            server_time: None,
+        }
+    }
+
+    // ===== Namespace transparency-log (SERVER_SPEC.md §8) =====
+
+    /// Submit a directory mutation (register/rotateKey/migrate/revoke).
+    pub fn submit_mutation(sender: &str, mutation: serde_json::Value) -> Self {
+        Self::fed(
+            sender,
+            "submitMutation",
+            serde_json::json!({ "mutation": mutation }),
+        )
+    }
+
+    /// Answer a register-mutation liveness challenge with the signed nonce.
+    pub fn submit_mutation_response(sender: &str, signature: &str) -> Self {
+        Self::fed(
+            sender,
+            "submitMutationResponse",
+            serde_json::json!({ "signature": signature }),
+        )
+    }
+
+    /// Request a proof-carrying lookup of a directory key.
+    pub fn lookup_proof(sender: &str, key: &str, frontier_size: u64) -> Self {
+        Self::fed(
+            sender,
+            "lookupProof",
+            serde_json::json!({ "key": key, "frontierSize": frontier_size }),
+        )
+    }
+
+    /// Request the node's signed descriptor (or a cached peer's by nodeId).
+    pub fn node_descriptor(sender: &str, node_id: Option<&str>) -> Self {
+        let payload = match node_id {
+            Some(id) => serde_json::json!({ "nodeId": id }),
+            None => serde_json::json!({}),
+        };
+        Self::fed(sender, "nodeDescriptor", payload)
+    }
+
+    /// Poll the finalization status of a submitted mutation.
+    pub fn mutation_status(sender: &str, mutation_hash: &str) -> Self {
+        Self::fed(
+            sender,
+            "mutationStatus",
+            serde_json::json!({ "mutationHash": mutation_hash }),
+        )
+    }
+
+    fn fed(sender: &str, action: &str, payload: serde_json::Value) -> Self {
+        Self {
+            message_type: "message".into(),
+            action: action.into(),
+            sender: sender.into(),
             recipient: "server".into(),
             payload,
             signature: "placeholder".into(),
@@ -204,12 +268,7 @@ impl MixnetMessage {
     }
 
     /// Query response from server
-    pub fn query_response(
-        sender: &str,
-        recipient: &str,
-        username: &str,
-        public_key: &str,
-    ) -> Self {
+    pub fn query_response(sender: &str, recipient: &str, username: &str, public_key: &str) -> Self {
         let payload = serde_json::json!({
             "username": username,
             "publicKey": public_key
@@ -288,11 +347,7 @@ impl MixnetMessage {
     ///
     /// The initiator no longer includes their own KP — only the responder's KP
     /// is consumed by the Add proposal when the group is created.
-    pub fn key_package_request(
-        sender: &str,
-        recipient: &str,
-        signature: &str,
-    ) -> Self {
+    pub fn key_package_request(sender: &str, recipient: &str, signature: &str) -> Self {
         let payload = serde_json::json!({});
         Self {
             message_type: "system".into(),
@@ -488,8 +543,6 @@ impl MixnetMessage {
         }
     }
 
-
-
     /// Update signature for a message
     pub fn set_signature(&mut self, signature: &str) {
         self.signature = signature.into();
@@ -618,7 +671,7 @@ impl MixnetMessage {
         }
     }
 
-/// Invite a user to a group by sending them a notification
+    /// Invite a user to a group by sending them a notification
     ///
     /// This is used to notify a user that they have been invited and should
     /// provide their KeyPackage to join.
@@ -817,12 +870,7 @@ impl MixnetMessage {
     /// * `group_id` - The MLS group ID
     /// * `since_id` - The last seen commit sequence ID (cursor), 0 for all
     /// * `signature` - PGP signature over "{group_id}:{since_id}"
-    pub fn sync_epoch(
-        username: &str,
-        group_id: &str,
-        since_id: i64,
-        signature: &str,
-    ) -> Self {
+    pub fn sync_epoch(username: &str, group_id: &str, since_id: i64, signature: &str) -> Self {
         let payload = serde_json::json!({
             "groupId": group_id,
             "sinceId": since_id

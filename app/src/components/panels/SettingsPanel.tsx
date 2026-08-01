@@ -41,6 +41,52 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [isClearingData, setIsClearingData] = useState(false);
 
+  // Identity transparency (federation) test state
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState<string | null>(null);
+  const [verifyInput, setVerifyInput] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyResult, setVerifyResult] = useState<api.VerifyResult | null>(null);
+
+  const handlePublishIdentity = async () => {
+    setIsPublishing(true);
+    setPublishResult(null);
+    try {
+      const res = await api.publishIdentity();
+      setPublishResult(res.message);
+      if (res.status === 'accepted') success('Identity published', res.message);
+      else info('Not published', res.message);
+    } catch (e) {
+      setPublishResult(String(e));
+      error('Publish failed', String(e));
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  const handleVerifyIdentity = async () => {
+    const name = verifyInput.trim();
+    if (!name) {
+      error('Enter a username', 'Type a username to verify');
+      return;
+    }
+    setIsVerifying(true);
+    setVerifyResult(null);
+    try {
+      const res = await api.verifyIdentity(name);
+      setVerifyResult(res);
+      if (res.status === 'verified') success('Verified', res.message);
+      else if (res.status === 'failed' || res.status === 'revoked')
+        error('Verification alert', res.message);
+      else info(res.status, res.message);
+    } catch (e) {
+      setVerifyResult({ status: 'failed', message: String(e) });
+      error('Verification failed', String(e));
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
   // Load server address on mount
   useEffect(() => {
     const loadServerAddress = async () => {
@@ -331,6 +377,87 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               <Trash2 className={cn('w-4 h-4', isClearingData && 'animate-pulse')} />
               <span>{isClearingData ? 'Clearing...' : 'Clear Local Data'}</span>
             </button>
+          </div>
+        </section>
+
+        {/* Identity Transparency Section */}
+        <section>
+          <div className="flex items-center gap-2 mb-4">
+            <Shield className="w-5 h-5 text-[var(--color-accent)]" />
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
+              Identity Transparency
+            </h3>
+          </div>
+
+          <div className="space-y-3 bg-[var(--color-bg-tertiary)] rounded-lg p-4">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Publish your identity key to the discovery node's tamper-evident log,
+              then verify anyone's key with a cryptographic proof. A node cannot
+              serve a fake key without the client detecting it.
+            </p>
+
+            <button
+              onClick={handlePublishIdentity}
+              disabled={isPublishing}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--color-bg-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={cn('w-4 h-4', isPublishing && 'animate-spin')} />
+              <span>{isPublishing ? 'Publishing...' : 'Publish My Identity'}</span>
+            </button>
+            {publishResult && (
+              <p className="text-xs text-[var(--color-text-secondary)]">{publishResult}</p>
+            )}
+
+            <div>
+              <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                Verify a user's identity
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={verifyInput}
+                  onChange={(e) => setVerifyInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleVerifyIdentity()}
+                  placeholder="username"
+                  className="flex-1 px-3 py-2 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-sm font-mono focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+                />
+                <button
+                  onClick={handleVerifyIdentity}
+                  disabled={isVerifying}
+                  className="px-3 py-2 rounded-lg bg-[var(--color-accent)] text-white hover:bg-[var(--color-accent-hover)] transition-colors text-sm font-medium disabled:opacity-50"
+                >
+                  {isVerifying ? '...' : 'Verify'}
+                </button>
+              </div>
+            </div>
+
+            {verifyResult && (
+              <div
+                className={cn(
+                  'rounded-lg p-3 text-sm',
+                  verifyResult.status === 'verified'
+                    ? 'bg-[var(--color-success)]/10 text-[var(--color-success)]'
+                    : verifyResult.status === 'absent' || verifyResult.status === 'migrated'
+                    ? 'bg-[var(--color-warning)]/10 text-[var(--color-warning)]'
+                    : 'bg-[var(--color-error)]/10 text-[var(--color-error)]'
+                )}
+              >
+                <div className="flex items-center gap-2 font-medium">
+                  {verifyResult.status === 'verified' ? (
+                    <Check className="w-4 h-4" />
+                  ) : (
+                    <Shield className="w-4 h-4" />
+                  )}
+                  <span className="uppercase text-xs tracking-wide">{verifyResult.status}</span>
+                </div>
+                <p className="mt-1">{verifyResult.message}</p>
+                {verifyResult.fingerprint && (
+                  <p className="mt-1 font-mono text-xs">
+                    key: {verifyResult.fingerprint} · seq {verifyResult.seqNo}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </section>
 

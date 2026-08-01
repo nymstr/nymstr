@@ -157,7 +157,11 @@ impl MlsCredential {
 
         // Constant-time comparison to prevent timing attacks
         use subtle::ConstantTimeEq;
-        bool::from(computed_fingerprint.as_slice().ct_eq(&self.pgp_key_fingerprint))
+        bool::from(
+            computed_fingerprint
+                .as_slice()
+                .ct_eq(&self.pgp_key_fingerprint),
+        )
     }
 
     /// Check if the credential has expired
@@ -600,8 +604,8 @@ mod tests {
 
     #[test]
     fn test_credential_serialization() {
-        let credential =
-            MlsCredential::new("charlie", b"pgp_key", vec![1, 2, 3]).expect("Failed to create credential");
+        let credential = MlsCredential::new("charlie", b"pgp_key", vec![1, 2, 3])
+            .expect("Failed to create credential");
 
         let bytes = credential.to_bytes().expect("Failed to serialize");
         let restored = MlsCredential::from_bytes(&bytes).expect("Failed to deserialize");

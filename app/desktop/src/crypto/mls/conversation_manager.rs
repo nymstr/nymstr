@@ -195,17 +195,18 @@ impl MlsConversationManager {
         let conversation_id = format!("dm:{}:{}", parts[0], parts[1]);
 
         // Look up the real MLS group ID from the database
-        let result: Option<(String,)> = sqlx::query_as(
-            "SELECT mls_group_id FROM conversations WHERE id = ?"
-        )
-        .bind(&conversation_id)
-        .fetch_optional(&self.db)
-        .await
-        .ok()
-        .flatten();
+        let result: Option<(String,)> =
+            sqlx::query_as("SELECT mls_group_id FROM conversations WHERE id = ?")
+                .bind(&conversation_id)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
 
         if let Some((mls_group_id_b64,)) = result {
-            if let Ok(mls_group_id) = base64::engine::general_purpose::STANDARD.decode(&mls_group_id_b64) {
+            if let Ok(mls_group_id) =
+                base64::engine::general_purpose::STANDARD.decode(&mls_group_id_b64)
+            {
                 if let Ok(client) = self.create_mls_client() {
                     return Ok(client.group_exists(&mls_group_id));
                 }
@@ -272,7 +273,11 @@ impl MlsConversationManager {
     }
 
     /// Try to process an MLS message, returning the decrypted content or an error
-    async fn try_process_mls_message(&self, conv_id: &str, mls_message_b64: &str) -> Result<String> {
+    async fn try_process_mls_message(
+        &self,
+        conv_id: &str,
+        mls_message_b64: &str,
+    ) -> Result<String> {
         // Decode the base64 MLS message
         let mls_message_bytes = base64::engine::general_purpose::STANDARD
             .decode(mls_message_b64)
@@ -557,9 +562,12 @@ impl MlsConversationManager {
         );
 
         // Look up the group server address for this conversation
-        let group_server_address = GroupDb::get_server_address_by_group_id(&self.db, conversation_id)
-            .await?
-            .ok_or_else(|| anyhow!("No group server found for conversation {}", conversation_id))?;
+        let group_server_address =
+            GroupDb::get_server_address_by_group_id(&self.db, conversation_id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("No group server found for conversation {}", conversation_id)
+                })?;
 
         // Create MLS client
         let mls_client = self.create_mls_client()?;
@@ -576,9 +584,7 @@ impl MlsConversationManager {
 
         // Sign the welcome message for authenticity
         let user = self.current_user.as_deref().unwrap_or("");
-        if let (Some(secret_key), Some(passphrase)) =
-            (&self.pgp_secret_key, &self.pgp_passphrase)
-        {
+        if let (Some(secret_key), Some(passphrase)) = (&self.pgp_secret_key, &self.pgp_passphrase) {
             let welcome_bytes = add_result.welcome.welcome_bytes.as_bytes();
             let signature = PgpSigner::sign_detached_secure(secret_key, welcome_bytes, passphrase)?;
 
